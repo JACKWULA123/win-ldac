@@ -72,10 +72,18 @@ if(HAVE_BTSTACK)
     target_include_directories(a2dp_ldac_source PUBLIC src)
     target_link_libraries(a2dp_ldac_source PUBLIC btstack ldac_wrapper)
 
+    # M6 (phase 1): persistent BTstack link key store, so we don't have
+    # to re-pair the XM5 every time we restart the program / reboot.
+    add_library(bt_link_key_db STATIC
+        src/bt/link_key_db_file.c
+    )
+    target_include_directories(bt_link_key_db PUBLIC src)
+    target_link_libraries(bt_link_key_db PUBLIC btstack)
+
     add_executable(a2dp_ldac_play_test
         src/tools/a2dp_ldac_play_test.c
     )
     target_include_directories(a2dp_ldac_play_test PRIVATE src)
     target_link_libraries(a2dp_ldac_play_test
-        PRIVATE btstack wasapi_loopback a2dp_ldac_source)
+        PRIVATE btstack wasapi_loopback a2dp_ldac_source bt_link_key_db)
 endif()

@@ -40,6 +40,7 @@
 #include "audio/wasapi_loopback.h"
 #include "a2dp_ldac/a2dp_ldac_caps.h"
 #include "a2dp_ldac/a2dp_ldac_source.h"
+#include "bt/link_key_db_file.h"
 
 // ── Configuration ──────────────────────────────────────────────────────
 #define TARGET_DEVICE_ADDR        "88:C9:E8:F7:D5:F3"
@@ -427,6 +428,11 @@ int main(int argc, char** argv) {
     btstack_memory_init();
     btstack_run_loop_init(btstack_run_loop_windows_get_instance());
     hci_init(hci_transport_usb_instance(), NULL);
+    // Swap BTstack's default in-memory link key DB for our file-backed
+    // one. Lets us survive a reboot without re-pairing the XM5.
+    hci_set_link_key_db(win_ldac_link_key_db_instance());
+    printf("[..] Link key store: %s\n", win_ldac_link_key_db_path());
+
     hci_event_callback_registration.callback = &hci_packet_handler;
     hci_add_event_handler(&hci_event_callback_registration);
 
