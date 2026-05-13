@@ -54,4 +54,28 @@ if(HAVE_BTSTACK)
         src/tools/a2dp_ldac_test.c
     )
     target_link_libraries(a2dp_ldac_test PRIVATE btstack)
+
+    # M5: full LDAC playback. WASAPI loopback → libldac encoder → AVDTP
+    # MEDIA PDUs → XM5. Acceptance test plays whatever Windows is
+    # rendering through the headphones, and Sony Headphones Connect
+    # reports the codec as LDAC.
+    add_library(ldac_wrapper STATIC
+        src/ldac/ldac_wrapper.c
+    )
+    target_include_directories(ldac_wrapper PUBLIC src)
+    target_link_libraries(ldac_wrapper PUBLIC ldac_enc)
+
+    add_library(a2dp_ldac_source STATIC
+        src/a2dp_ldac/a2dp_ldac_caps.c
+        src/a2dp_ldac/a2dp_ldac_source.c
+    )
+    target_include_directories(a2dp_ldac_source PUBLIC src)
+    target_link_libraries(a2dp_ldac_source PUBLIC btstack ldac_wrapper)
+
+    add_executable(a2dp_ldac_play_test
+        src/tools/a2dp_ldac_play_test.c
+    )
+    target_include_directories(a2dp_ldac_play_test PRIVATE src)
+    target_link_libraries(a2dp_ldac_play_test
+        PRIVATE btstack wasapi_loopback a2dp_ldac_source)
 endif()
