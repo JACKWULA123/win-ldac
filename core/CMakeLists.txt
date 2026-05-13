@@ -30,4 +30,19 @@ if(HAVE_BTSTACK)
         src/tools/a2dp_sine_test.c
     )
     target_link_libraries(a2dp_sine_test PRIVATE btstack)
+
+    # M3.2: A2DP source with SBC codec, audio from WASAPI loopback.
+    # Same plumbing as M3.1 but the audio frames come from whatever
+    # Windows is currently rendering on its default endpoint.
+    add_library(wasapi_loopback STATIC
+        src/audio/wasapi_loopback.cpp
+    )
+    target_include_directories(wasapi_loopback PUBLIC src)
+    target_link_libraries(wasapi_loopback PUBLIC ole32)
+
+    add_executable(a2dp_wasapi_test
+        src/tools/a2dp_wasapi_test.c
+    )
+    target_include_directories(a2dp_wasapi_test PRIVATE src)
+    target_link_libraries(a2dp_wasapi_test PRIVATE btstack wasapi_loopback)
 endif()

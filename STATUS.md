@@ -3,114 +3,123 @@
 最近更新：2026-05-12
 
 ## 当前里程碑
-**M3.1 软件就绪 ⏳**，等用户做硬件测试验证 XM5 出声。
+**M3.1 完成 ✅** (commit `b978a99`)
+**M3.2 软件就绪 ⏳** — 等你跑硬件测试听 Spotify
 
 ## 本次会话做了什么
 
-### Commit M1 + M2
-- 第一次正式 commit：`5be03b4 — M1 + M2: libldac integration + BTstack HCI with Realtek firmware`
-- 含 18 个文件（不含 BTstack，按约定用户自拉）
+### M3.1 commit
+- commit `b978a99`：a2dp_sine_test + exit 修复（HCI_STATE_OFF → exit(0)）
+- 你之前那次 60 秒 sine 测试硬件验收已通过
 
-### M3.1：A2DP source + SBC + sine wave 工具
-- 新文件：`core/src/tools/a2dp_sine_test.c`（~350 行 C）
-- 结构参考 `vendor/btstack/example/a2dp_source_demo.c`，剥掉 AVRCP / modplayer / stdin 命令交互，只保留"连上耳机 → 协商 SBC → 持续推 sine wave 60 秒"
-- 关键设计：
-  - Hardcode 连 `88:C9:E8:F7:D5:F3`（M2 抓到的 XM5）
-  - SBC capability 字节：44.1 / 48k stereo，block/subbands/alloc 全 0xFF（让 XM5 自选）
-  - PreferredSamplingFrequency = 44100（SBC 在 44.1 上音质最稳）
-  - SSP "Just Works"：`IO_CAPABILITY_NO_INPUT_NO_OUTPUT` + `auto_accept=true`，配对无需人工
-  - Legacy PIN fallback：如果 XM5 突然走 legacy 配对，回 "0000"
-  - 10 ms 定时器驱动 SBC 编码 + 包累积 + can_send_now 触发推送
-  - 60 秒后自动 power off + 退出（避免无限循环）
-- 复用 M2 已实现的 Realtek 固件加载逻辑（同一个 firmware/ 自动定位函数）
-- 构建产物：`build/core/Release/a2dp_sine_test.exe` (~270 KB)，构建干净无 warning/error
+### M3.2：WASAPI loopback 接入
+新增文件：
+- `core/src/audio/wasapi_loopback.h` — C 可调用 API（init / start / read / available / stop）
+- `core/src/audio/wasapi_loopback.cpp` — COM 实现，独立 capture 线程，mutex 保护的 ring buffer
+- `core/src/tools/a2dp_wasapi_test.c` — M3.2 验收工具（复刻 a2dp_sine_test 但音频源换成 WASAPI）
 
-### 没做什么（M3.2 / M3.3 留给后续）
-- ❌ WASAPI loopback 抓系统音频（M3.2）
-- ❌ link key 持久化（M3.3）—— 当前每次启动都得 XM5 重新接受配对
-- ❌ AVRCP（可推到 v2）
+**关键设计要点**：
+1. **采样率对齐**：先启动 WASAPI 拿系统 mixer 的采样率（44.1 或 48 kHz），把这个值作为 A2DP `preferred_sampling_frequency` 推给 XM5 协商。这样不需要重采样器。
+2. **拒绝高采样率**：如果系统 mixer 是 88.2/96/192 kHz，wasapi_loopback_init 返回 -2 并提示用户去 Windows 声音设置里改成 44.1k 或 48k。SBC/LDAC 都不支持那些率。
+3. **格式探测**：接受 IEEE float (32-bit) 和 s16 两种采样格式，其它（s24/s32-int）当前不支持。如果遇到 wFormatTag = WAVE_FORMAT_EXTENSIBLE，正确解析 SubFormat。
+4. **AUDCLNT_BUFFERFLAGS_SILENT 处理**：Windows 没人播放时 WASAPI 仍然按 10 ms 节奏发空包，flag 里带 SILENT。我们要把这些当成静音帧 push 进 ring buffer，**保持时间轴稳定**；否则 SBC 编码端会饥饿。
+5. **欠载兜底**：audio_timer 从 ring buffer 读，如果不够就补零并累加 `underrun_total_samples` 计数器，运行结束打印。健康状态下应该是 0。
+6. **线程模型**：单 producer（WASAPI capture 线程）+ 单 consumer（BTstack run loop），mutex ring buffer 完全够用（48k stereo s16 ≈ 192 KB/s，mutex 开销 < 1 μs）。
+
+### 沙箱验证
+- 构建干净（只一个 WIN32_LEAN_AND_MEAN 重复定义 warning，无害）
+- 沙箱里跑 `a2dp_wasapi_test.exe` 报 `GetDefaultAudioEndpoint failed: 0x80070490` 退出码 2 ——这是预期的：沙箱进程没有交互式 audio session 权限。**正常用户 PowerShell 跑应该能成功 init**。
 
 ## 卡在哪
-**等用户在硬件上跑测试**。需要：
-- UB4A dongle 插着 + WinUSB 驱动（M2 已做）
-- XM5：**不在配对模式**也可以试（已配对过一次），如果连不上则进入配对模式再试
+**用户的 hung sine_test (PID 3780) 仍占用 `a2dp_sine_test.exe` 文件锁**，我这边没 admin 权限 kill。**不影响 M3.2 测试**（不同 exe），但下次想重编 M3.1 之前你得手动 Ctrl+C 或关那个 PowerShell 窗口。
 
-## 下次接手应该做什么（具体到第一个命令）
+## 下次接手应该做什么（M3.2 硬件验收）
 
-### 用户做硬件测试
+### 前置（如果还没做）
+1. 确保 dongle 仍是 WinUSB 驱动（M2 已做过应该还在）
+2. **检查 Windows 声音设置的采样率**：
+   - 系统托盘右键音量图标 → 声音设置 → 设备属性 → 高级
+   - 看默认格式：必须是 **44100 Hz** 或 **48000 Hz**（位深 16 或 24 都行）
+   - 96000/192000 Hz 我们当前版本不支持，会拒绝运行并提示
 
-XM5 戴上头上，pc 端跑：
-
+### 跑测试
 ```
-D:\claude\ldac\build\core\Release\a2dp_sine_test.exe
+D:\claude\ldac\build\core\Release\a2dp_wasapi_test.exe
 ```
 
-### 预期输出（成功路径）
+测试程序会：
+1. 启动 WASAPI loopback，打印 mixer 采样率和声道数
+2. 启动 BTstack，加载 Realtek 固件，连 XM5
+3. A2DP 协商完毕后开始抓系统音频 → SBC 编码 → 推到 XM5
+4. **此时你打开 Spotify / B 站 / 浏览器播放音乐，应该从 XM5 听到声音**
+5. 跑 120 秒后自动停止；想提前退出按 Ctrl+C
 
+### 预期成功输出
 ```
-a2dp_sine_test - M3.1 acceptance
-================================
-Target: XM5 at 88:C9:E8:F7:D5:F3
-[..] Realtek firmware folder: ...
-Realtek: Using firmware ...
-Realtek: Received key id 0xef
-Realtek: FW/CONFIG total length is 30210, max patch size id 40960
+a2dp_wasapi_test - M3.2 acceptance
+==================================
+[OK] WASAPI loopback: 48000 Hz, 2 channels (system mixer format)
+[..] Realtek firmware folder: D:\claude\ldac\firmware
+Realtek: ...
 [OK] HCI up. Local 50:3D:D1:56:FF:0B. Connecting to XM5 88:C9:E8:F7:D5:F3 ...
 [..] SSP user confirmation from 88:C9:E8:F7:D5:F3 — auto-accept
-[OK] A2DP signaling established with 88:C9:E8:F7:D5:F3 (cid 0x0001)
-[OK] SBC negotiated: 44100 Hz, 2 ch, blocks=16, subbands=8, bitpool=53, alloc=1, ch_mode=3
+[OK] A2DP signaling established with 88:C9:E8:F7:D5:F3 (cid 0x...)
+[OK] SBC negotiated: 48000 Hz, blocks=16, subbands=8, bitpool=53
 [OK] A2DP stream open; starting playback...
-[OK] Stream started — 441 Hz tone should be audible on XM5 for 60 seconds.
+[OK] Stream started. Play something on Windows now — Spotify, B 站, anything.
+    Test will run for 120 s; press Ctrl+C to stop early.
 
-(60 秒持续不动，耳机里听到稳定的 441 Hz "嘟──" 声)
+(此时打开 Spotify 播一首歌，XM5 应该出声)
 
-[ PASS ]  M3.1 test duration elapsed. Shutting down.
-[..] Stream released
-[..] Signaling connection released
+[ PASS ]  M3.2 test duration elapsed. Total WASAPI underrun samples: 0
+HCI off. Bye.
 ```
 
 ### 验收
-- **耳机里能听到稳定的纯音 60 秒**：M3.1 PASS
-- 短促播放后就断：M3.1 部分 PASS，需要调试 timing/packet 推送
-- 完全没声音但 stream started 出来了：可能是 codec 配置问题或定时器问题
-- 在 SSP 阶段挂住：可能 XM5 还记着旧配对失败，**用 Sony 耳机 APP 或在 XM5 上长按按钮删除我们 dongle 的配对**重试
-- 在 establish_stream 之前就报错：XM5 没准备好连接（戴上头上、不在配对模式但能被 page）
+- ✅ **PASS**：能从 XM5 听到 Spotify / 浏览器视频 / 任何 Windows 系统声音
+- ✅ underrun_total_samples 越接近 0 越好（少量是正常的 timing jitter，几百几千以下都 OK）
+- ❌ 完全没声：检查 Windows 是不是真在播音乐、是不是默认输出设备（Spotify 可能输出到了别的设备）
+- ❌ 听到但卡顿严重：underrun 数会很大，可能是 SBC 编码不够快或线程调度问题
 
 ### 如果失败常见诊断
 
-| 输出特征 | 可能原因 | 建议 |
+| 现象 | 原因 | 修法 |
 |---|---|---|
-| `a2dp_source_establish_stream rc=0x...` | XM5 不可达 | XM5 戴上头上、断开其它设备的连接 |
-| 连了上但 SBC negotiated 后没下文 | XM5 拒绝了 SBC config（少见） | 抓 hci log，看 AVDTP 流程 |
-| Stream started 但耳机没声 | 定时器 / can_send_now 没触发 | 加 printf 看每包发送时机 |
-| 卡在 SSP user confirmation | 配对失败 | XM5 端清理 dongle 配对记录 |
-| 听到声但 5-10 秒后断 | XM5 没看到媒体包流，超时关连接 | timing 问题，提高定时器频率或排查 sbc_storage 逻辑 |
+| `wasapi_loopback_init returned -2` | 系统采样率不是 44.1/48k | Windows 声音设置 → 设备属性 → 高级，改 16-bit 48000 Hz |
+| `wasapi_loopback_init returned -3` | 格式不是 float 或 s16 | 同上，确保位深 16 或 24（24-bit 内部其实是 float） |
+| WASAPI OK 但 A2DP 阶段失败 | 同 M3.1 失败模式 | 检查 XM5、检查配对 |
+| 听到声但音调不对（变调） | WASAPI rate ≠ SBC rate（极少见，因为我们传递了 preferred rate） | 检查 stdout 里 `[WARN]` 行 |
+| underrun 巨大（数十万） | ring buffer 没正常生产或消费 | 排查 wasapi 线程是否真跑起来 |
 
-### M3.1 通过 → 决定下一步
+### M3.2 通过后
 
-- **M3.2**（WASAPI loopback 取代 sine）—— 让 Spotify 真能出声，这才是用户最直观的"它工作了"
-- 或先 commit M3.1 再去 M5（LDAC 协商和真出 LDAC 声音）
-- 或者把 M3.3（link key 持久化）插进去
+下一站：**M4 + M5**——LDAC capability 协商 + 实际推 LDAC 音频（不再是 SBC）。这是真正的项目目标。
 
-推荐顺序：**M3.1 PASS → commit → M3.2（WASAPI）→ commit → 直接跳到 M4+M5（LDAC）**。M3.3 link key 持久化可以放到 M6"硬化"阶段。
+预估工作：
+- M4：编 LDAC vendor codec capability 字节，注册非 SBC 的 stream endpoint，让 XM5 协商时选 LDAC 而不是 SBC（~1 天）
+- M5：移植 AOSP `a2dp_vendor_ldac_encoder.cc` 的 RTP 封包逻辑，替换 SBC 编码路径（~2-3 天）
+- 验收：Sony Headphones Connect APP 里查看 codec 显示 LDAC，正常播放音乐 5 分钟无中断
 
 ## 本次会话引入的新依赖 / 配置 / 决策
 
-- A2DP source 角色 + bluedroid SBC encoder 已通过 `cmake/btstack.cmake` 集成（M2 时就编进了 `btstack.lib`，本轮第一次实际链接使用）
-- 配对策略：SSP Just Works + 自动接受，避免人工交互；legacy PIN 0000 兜底
-- 测试期间 hardcode BD_ADDR；正式 core 程序会做扫描+设备选择（M6+）
-- 决策：M3.1 后立即开 M3.2（WASAPI），不在 M3.1 上做 link key 持久化
+- 新增 `core/src/audio/` 目录（WASAPI 模块）
+- WASAPI capture 线程 + mutex ring buffer 架构定型
+- 系统采样率约束：必须 44.1k 或 48k（高码率支持留给 M6+ 加 resampler）
+- M3.2 不做 link key 持久化（M3.3 推到 M6）
 
 ## 仓库当前状态
 
 ```
 ldac/
-├── 已 commit: 5be03b4 (M1+M2)
+├── 已 commit:
+│   5be03b4 (M1+M2)
+│   b978a99 (M3.1)
 ├── 未 commit:
-│   ├── STATUS.md (本文件，描述 M3.1)
-│   ├── core/CMakeLists.txt (加 a2dp_sine_test target)
-│   ├── core/src/tools/a2dp_sine_test.c (M3.1 新文件)
-│   └── core/src/tools/hci_scan_test.c (M2 时的 UTF-8 修复)
+│   ├── STATUS.md
+│   ├── core/CMakeLists.txt
+│   ├── core/src/audio/wasapi_loopback.{h,cpp}
+│   └── core/src/tools/a2dp_wasapi_test.c
 └── 构建产物：
-    └── build/core/Release/a2dp_sine_test.exe (~270 KB)
+    ├── build/core/Release/a2dp_wasapi_test.exe (~275 KB)
+    └── build/core/Release/wasapi_loopback.lib
 ```
