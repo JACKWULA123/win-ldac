@@ -23,4 +23,11 @@ if(HAVE_BTSTACK)
         src/tools/hci_scan_test.c
     )
     target_link_libraries(hci_scan_test PRIVATE btstack)
+
+    # M3.1: A2DP source with SBC codec, sine wave generator → XM5.
+    # Hardcodes the XM5 BD_ADDR captured in M2.
+    add_executable(a2dp_sine_test
+        src/tools/a2dp_sine_test.c
+    )
+    target_link_libraries(a2dp_sine_test PRIVATE btstack)
 endif()
