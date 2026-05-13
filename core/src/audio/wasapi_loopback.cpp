@@ -256,11 +256,16 @@ extern "C" int wasapi_loopback_init(int* out_sample_rate, int* out_channels) {
     s->sample_rate = static_cast<int>(s->mix_format->nSamplesPerSec);
     s->channels    = static_cast<int>(s->mix_format->nChannels);
 
-    if (s->sample_rate != 44100 && s->sample_rate != 48000) {
+    // LDAC supports {44.1, 48, 88.2, 96} kHz; anything else needs a
+    // resampler, which we don't implement. SBC tools only handle the
+    // lower two rates — at 88.2/96 kHz the SBC negotiation will fail
+    // downstream, but wasapi_loopback itself stays codec-agnostic.
+    if (s->sample_rate != 44100 && s->sample_rate != 48000 &&
+        s->sample_rate != 88200 && s->sample_rate != 96000) {
         std::fprintf(stderr,
-            "[wasapi] System mixer is %d Hz, which SBC/LDAC don't support.\n"
-            "         Set Windows → Sound → Properties → Advanced to\n"
-            "         16-bit/48000 Hz (or 24-bit, 48000 Hz) and try again.\n",
+            "[wasapi] System mixer is %d Hz; LDAC only supports\n"
+            "         44.1 / 48 / 88.2 / 96 kHz. Set Windows → Sound →\n"
+            "         Properties → Advanced to one of those rates.\n",
             s->sample_rate);
         delete s;
         if (com_inited) CoUninitialize();

@@ -86,4 +86,23 @@ if(HAVE_BTSTACK)
     target_include_directories(a2dp_ldac_play_test PRIVATE src)
     target_link_libraries(a2dp_ldac_play_test
         PRIVATE btstack wasapi_loopback a2dp_ldac_source bt_link_key_db)
+
+    # M6.2: auto-reconnect. Same playback path as the M5 tool but the
+    # link stays alive — if XM5 powers off / goes out of range, we keep
+    # retrying until it comes back. The reconnect supervisor lives in
+    # core/src/app/ and is reused later by the real win-ldac-core entry
+    # point.
+    add_library(reconnect_supervisor STATIC
+        src/app/reconnect_supervisor.c
+    )
+    target_include_directories(reconnect_supervisor PUBLIC src)
+    target_link_libraries(reconnect_supervisor PUBLIC btstack)
+
+    add_executable(a2dp_ldac_persistent_test
+        src/tools/a2dp_ldac_persistent_test.c
+    )
+    target_include_directories(a2dp_ldac_persistent_test PRIVATE src)
+    target_link_libraries(a2dp_ldac_persistent_test
+        PRIVATE btstack wasapi_loopback a2dp_ldac_source bt_link_key_db
+                reconnect_supervisor)
 endif()
