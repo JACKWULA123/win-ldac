@@ -1,0 +1,38 @@
+# Build artifacts
+build/
+out/
+bin/
+*.obj
+*.lib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+*.sln.iobj
+*.sln.ipdb
+CMakeUserPresets.json
+
+# User-fetched dependency (see HANDOFF.md §4.2; BTstack license forbids us bundling it)
+vendor/btstack/
+
+# Local test artifacts
+out.ldac
+*.wav
+test_*.bin
+
+# Pairing key store (created at runtime)
+linkkeys.json
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Claude Code per-project settings
+.claude/

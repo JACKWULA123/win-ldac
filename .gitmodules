@@ -1,0 +1,3 @@
+[submodule "vendor/ldacBT"]
+	path = vendor/ldacBT
+	url = https://github.com/EHfive/ldacBT.git
