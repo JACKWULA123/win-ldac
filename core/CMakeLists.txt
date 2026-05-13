@@ -45,4 +45,13 @@ if(HAVE_BTSTACK)
     )
     target_include_directories(a2dp_wasapi_test PRIVATE src)
     target_link_libraries(a2dp_wasapi_test PRIVATE btstack wasapi_loopback)
+
+    # M4: negotiate LDAC over A2DP (no audio streaming). Connects to XM5,
+    # advertises only an LDAC SEP, drives the vendor SET_CONFIGURATION,
+    # and reports the negotiated parameters. PASSes if XM5 accepts an
+    # LDAC config.
+    add_executable(a2dp_ldac_test
+        src/tools/a2dp_ldac_test.c
+    )
+    target_link_libraries(a2dp_ldac_test PRIVATE btstack)
 endif()
