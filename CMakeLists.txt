@@ -74,7 +74,7 @@ endif()
 
 # ─────────────────────────────────────────────────────────────
 #  BTstack (user-fetched, not a submodule). Only built if the
-#  user has cloned vendor/btstack/. See HANDOFF.md §4.2.
+#  user has cloned vendor/btstack/. See docs/ARCHITECTURE.md §4.2.
 # ─────────────────────────────────────────────────────────────
 option(WITH_BTSTACK "Build BTstack-dependent targets if vendor/btstack exists" ON)
 set(HAVE_BTSTACK FALSE)

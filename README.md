@@ -1,99 +1,238 @@
-# Windows LDAC
+# win-ldac
 
-让 Windows 10 PC 通过外接 USB 蓝牙 dongle 用 **LDAC** 编码连接索尼 / 其它支持 LDAC 的蓝牙耳机，提供最高 990 kbps 无线音质。
+**LDAC for Windows.** Stream system audio from your PC to Sony WH-1000XM-class
+(or any LDAC-capable) Bluetooth headphones at up to **990 kbps**, the same
+quality you'd get from a modern Android phone.
 
-> ⚠️ **项目仍在开发中**。当前进度见 [STATUS.md](STATUS.md)。完整技术文档见 [HANDOFF.md](HANDOFF.md)。
+> 🇨🇳 中文 README：[README.zh.md](README.zh.md)
 
-## 为什么需要这个
+Windows's built-in Bluetooth stack only does SBC (~328 kbps). LDAC support has
+historically only existed in expensive closed-source software. `win-ldac` is
+the open-source alternative.
 
-Windows 内置蓝牙栈只支持 SBC，最高 ~328 kbps。LDAC（Sony 990 kbps）在 Windows 上没有原生支持，市面上唯一可用的是付费闭源软件。本项目是其开源替代。
+| Status | M9 complete — full GUI + system tray + auto-start |
+|---|---|
 
-## 工作原理
+## How it works
 
-- 一个独立的 **USB 蓝牙 dongle**，驱动由 Zadig 替换为 WinUSB
-- 用户态 C++ 程序通过 BTstack 直接操作 dongle
-- WASAPI loopback 抓系统音频 → libldac 编码 → A2DP source 发送
-- **Windows 自带蓝牙不动**（你的鼠标键盘照常用）
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  Windows 10/11 user-space                                           │
+│                                                                     │
+│   [ System audio ] ──► WASAPI loopback ──► libldac ──► A2DP source  │
+│                                              (Sony,        │        │
+│                                              Apache 2.0)   ▼        │
+│                                                         BTstack     │
+│                                                         (user-fetch)│
+│                                                            │        │
+│                                                            ▼        │
+│                                            [ USB Bluetooth dongle ] │
+│                                            (WinUSB driver via Zadig)│
+└────────────────────────────────────────────┼────────────────────────┘
+                                             │
+                                             ▼  Bluetooth 2.4 GHz
+                                  [ Sony WH-1000XM5 ]
+```
 
-## 硬件要求
+- A **separate USB Bluetooth dongle** is used, with its driver swapped
+  from Microsoft's stack to **WinUSB** via [Zadig](https://zadig.akeo.ie/).
+- A user-space C++ program drives the dongle through
+  [BTstack](https://github.com/bluekitchen/btstack), encodes the audio
+  with [libldac](https://github.com/EHfive/ldacBT), and pushes RTP-framed
+  LDAC over A2DP.
+- **Your built-in Bluetooth is untouched** — keep using your mouse and
+  keyboard normally.
 
-- Windows 10 (x64) 或更高版本
-- **一只独立 USB 蓝牙 dongle**（不能用笔记本/PC 内置的）
-- 支持 LDAC 的蓝牙耳机（如 Sony WH-1000XM5）
+## Screenshot
 
-### 支持的 USB BT Dongle
+> _GUI built with [Dear ImGui](https://github.com/ocornut/imgui) + DirectX 11.
+> A live screenshot will be added once the repo is public._
 
-| 推荐度 | 芯片 | 例子（市面常见型号） | 备注 |
-|---|---|---|---|
-| 🌟 首选 | **Realtek RTL8761B / RTL8761BU** | TP-Link **UB4A** / UB400 v2 / UB500，Orico BTA-508，EDUP EP-9619 | 固件已 bundle 在 `firmware/` |
-| ✅ 可用 | CSR8510 (CSR 4.0) | 各种白牌 "CSR 4.0 nano BT dongle"，TP-Link UB400 v1 | 零固件，但芯片已停产 |
-| 🟡 实验性 | RTL8821C / RTL8822C / RTL8723D 等 | Realtek 其它型号 | 需自行下载对应固件到 `firmware/`（见 `firmware/README.md`） |
-| ❌ 不支持 | Intel AX 系列、Broadcom 系列 | — | 固件加载协议复杂，未集成 |
+## Licence & distribution constraints — read this first
 
-> ⚠️ **绝对不要用笔记本/PC 内置的蓝牙模块**。本项目会接管 USB BT dongle 的驱动；如果接管的是内置蓝牙，可能影响 Wi-Fi 共天线，且很难恢复。Zadig 选错设备时一定检查 VID/PID。
+This repository's source code is **Apache 2.0**. You can fork, modify,
+self-build, and share the source freely.
 
-## 编译方式
+**But you may NOT distribute compiled binaries.**
 
-### 一次性环境
-- **Visual Studio 2022**（含 C++ 桌面开发 + CMake）
-- **Git**
-- **Zadig** 2.8+：<https://zadig.akeo.ie/>
-- **关闭 Windows "Memory Integrity"**（设置 → 隐私和安全性 → Windows 安全中心 → 设备安全性 → 内核隔离），否则 Zadig 替换驱动会失败。改完需重启。
+`win-ldac` links against **[BTstack](https://github.com/bluekitchen/btstack)**,
+which is free for personal / non-commercial use only. Commercial or
+redistribution use requires a paid licence from BlueKitchen GmbH. To stay on
+the safe side this project ships **source only** — each user clones the
+repository and builds locally for their own machine.
 
-### 拉代码并编译
+In practice:
 
-```bash
-git clone <repo-url> ldac
-cd ldac
-git submodule update --init --recursive
+- ✅ Clone, build, use for yourself — fine.
+- ✅ Fork, modify, push your fork to GitHub — fine.
+- ✅ Show a friend the repo so they can build it themselves — fine.
+- ❌ Upload `win-ldac.exe` anywhere public.
+- ❌ Sell it.
+- ❌ Bundle it with any redistributable installer.
 
-# BTstack 不在本仓库（license 约束，详见下方），请自行 clone：
+See [`NOTICE`](NOTICE) for the full licence map.
+
+## Hardware requirements
+
+### USB Bluetooth dongle
+
+You **must** have a USB BT dongle dedicated to `win-ldac` (the driver gets
+swapped to WinUSB, so it can't be used by Windows in parallel).
+
+| Chipset family | Examples | Status |
+|---|---|---|
+| **Realtek RTL8761B / RTL8761BU** | TP-Link UB4A / UB400 v2 / UB500, Orico BTA-508, EDUP EP-9619, Ugreen 80889 | ✅ **First choice** — cheap, common, firmware bundled in this repo |
+| **CSR8510** | "CSR 4.0" nano dongles, old TP-Link UB400 v1 | ✅ Works — but CSR is discontinued |
+| RTL8821C / RTL8822C / RTL8723D | Various OEM | 🟡 BTstack supports them; firmware not bundled. Add the relevant `.bin` to `firmware/` |
+| Intel AX200 / AX210 | WiFi+BT combo cards | ❌ Multi-stage firmware load not implemented |
+| Built-in laptop / PC Bluetooth | — | ❌ **Do not use.** Driver swap may co-occupy Wi-Fi antennas and be hard to recover. |
+
+### Headphones
+
+Any A2DP sink that advertises the LDAC vendor codec:
+
+- Sony WH-1000XM3 / XM4 / XM5 / XM6 (the test target)
+- Sony WF-1000XM3 / XM4 / XM5
+- Sony LinkBuds, ULT Wear, etc.
+- Most non-Sony Hi-Res-certified IEMs that licence LDAC (FiiO, Anker, etc.)
+
+If the headphones speak LDAC, this should work.
+
+## Build from source
+
+### Prerequisites
+
+- **Windows 10 (x64)** or newer
+- **Visual Studio 2022** with the *Desktop development with C++* workload
+  (includes MSVC, the Windows SDK ≥ 10.0.22621, and CMake ≥ 3.16)
+- **Git** with submodule support
+- **Zadig** ≥ 2.8 ([zadig.akeo.ie](https://zadig.akeo.ie/))
+- A supported BT dongle
+- **Memory Integrity / Core Isolation turned OFF**
+  (Settings → Privacy & security → Windows Security → Device security →
+  Core isolation → Memory integrity = Off, reboot)
+
+### Clone + dependencies
+
+```powershell
+git clone --recursive https://github.com/YOUR_GITHUB_USERNAME/win-ldac.git
+cd win-ldac
+
+# BTstack is user-fetched on purpose — see "Licence" above.
 git clone https://github.com/bluekitchen/btstack.git vendor/btstack
+```
 
+`--recursive` pulls libldac, Dear ImGui, and ImPlot via git submodules.
+
+### One-click build (recommended)
+
+```powershell
+.\build.ps1
+```
+
+The script verifies dependencies, runs CMake, and produces
+`build\gui\Release\win-ldac.exe`.
+
+### Manual build
+
+```powershell
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ```
 
-### 替换 USB BT dongle 驱动
+After build:
 
-1. 插上 dongle
-2. 打开 Zadig，菜单 **Options → List All Devices**
-3. 在下拉框找到你的 dongle（**注意 VID/PID，不要选错成内置蓝牙！**）
-4. 右侧驱动选 **WinUSB**，点 **Replace Driver**
+- `build\gui\Release\win-ldac.exe` — the GUI app
+- `build\core\Release\*.exe` — CLI tools (`engine_persistent_test` is the
+  headless equivalent of the GUI)
 
-### 运行
+## First-time setup on the target machine
 
-```bash
-build\core\Release\win-ldac-core.exe
+1. **Plug in the dongle.**
+2. **Run Zadig.** Options → List All Devices. Pick your dongle (double-check
+   VID/PID — don't touch built-in Bluetooth). Driver = WinUSB. Replace driver.
+3. **Put headphones in pairing mode.** Sony XM-series: long-press the right
+   power button ~7 s until the light flashes blue.
+4. **Run `win-ldac.exe`.** First launch shows *Not paired*. Click
+   *Pair new device* → *Scan now* → wait ~10 s → select your headphones →
+   *Pair*.
+5. Subsequent launches **auto-connect** as soon as Windows plays audio.
+
+## Day-to-day use
+
+- Closing the window (`X`) **hides** to the system tray. The app keeps
+  running and audio keeps flowing.
+- Double-click the tray icon to bring the window back.
+- Right-click the tray icon for *Open / Start with Windows / Quit*.
+- Switch between **Fixed (990 kbps)** and **Adaptive** in the main UI.
+  Adaptive lowers the bitrate (to 660 / 330) when the radio link is weak.
+- **Connection Refresh** force-reconnects when audio glitches.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| GUI shows *Unsupported sample rate* | LDAC only accepts 44.1 / 48 / 88.2 / 96 kHz. Open `mmsys.cpl` → right-click your default output → Properties → Advanced → set Default Format. Restart `win-ldac.exe`. |
+| Scan finds nothing | Make sure headphones are in **pairing mode** (fast blue blink), not just on. The first inquiry occasionally misses devices — click *Scan now* again. |
+| Dongle shows ⚠ in Device Manager after Zadig | Memory Integrity is still on. Turn it off, reboot, re-run Zadig. |
+| Connects but no sound | Make sure Windows's *default playback device* is the speaker you want to mirror — `win-ldac` captures whatever Windows is playing. |
+| Audio stutters | Move closer to the dongle / switch to **Adaptive** mode / click *Connection Refresh*. |
+| "VCRUNTIME140.dll missing" on a fresh machine | Install [Microsoft Visual C++ Redistributable 2015–2022](https://aka.ms/vs/17/release/vc_redist.x64.exe). |
+
+## Project structure
+
+```
+win-ldac/
+├── README.md            ← you are here
+├── README.zh.md         ← Chinese version
+├── LICENSE              ← Apache 2.0
+├── NOTICE               ← third-party copyrights
+├── STATUS.md            ← milestone progress
+├── build.ps1            ← one-click build
+├── CMakeLists.txt
+├── cmake/               ← BTstack + MSVC compat shims
+├── core/                ← engine library + CLI tools
+│   ├── CMakeLists.txt
+│   └── src/{a2dp_ldac,app,audio,bt,engine,ldac,tools}/
+├── gui/                 ← win-ldac.exe (Dear ImGui + DX11)
+│   ├── CMakeLists.txt
+│   ├── win-ldac.rc.in
+│   └── src/{ui/}
+├── assets/              ← font, watermark, icon
+├── firmware/            ← Realtek RTL8761BU firmware
+├── docs/
+│   └── ARCHITECTURE.md  ← deep-dive design doc (formerly HANDOFF.md)
+├── third_party/         ← imgui, implot (git submodules)
+└── vendor/
+    ├── ldacBT/          ← Sony libldac (git submodule)
+    └── btstack/         ← BTstack (user-fetched, NOT a submodule)
 ```
 
-首次运行需要让耳机进入配对模式（XM5 是长按右侧电源键 7 秒，蓝灯快闪）。
+## Deeper documentation
 
-## License
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — component-by-component
+  design notes, A2DP/AVDTP protocol details, library API references, and
+  the laundry list of bugs / gotchas already worked around.
+- [`STATUS.md`](STATUS.md) — milestone-by-milestone progress log.
+- [`assets/README.md`](assets/README.md) — UI asset details + licence
+  attributions.
+- [`firmware/README.md`](firmware/README.md) — Realtek firmware bundling
+  notes.
 
-- **本项目自身代码**：Apache License 2.0
-- **依赖项**：
-  - [libldac](https://android.googlesource.com/platform/external/libldac) (Sony) — Apache 2.0
-  - [Dear ImGui](https://github.com/ocornut/imgui) — MIT
-  - [nlohmann/json](https://github.com/nlohmann/json) — MIT
-  - **[BTstack](https://github.com/bluekitchen/btstack)** — **个人/非商业免费**，商业用途须向 [BlueKitchen GmbH](https://bluekitchen-gmbh.com/) 购买授权
+## Contributing
 
-### ⚠️ 分发限制
+This is a personal project. PRs welcome but please open an issue first
+describing the change. Don't post compiled binaries in releases or
+artifacts — that violates BTstack's licence (see *Licence & distribution
+constraints* above).
 
-由于 BTstack 的非商业 license：
+## Acknowledgements
 
-- ✅ 可以 fork、修改、自用、给朋友传源码
-- ❌ **不要分发预编译二进制**——任何形式（GitHub Release、CI artifact、网盘分享）都不行
-- ❌ **不要商用**
-
-如果你需要分发二进制或商用，请联系 BlueKitchen 取得 BTstack 商业许可，或等本项目升级到"路线 1"（自写蓝牙栈，时间未定）。
-
-## 贡献 / 反馈
-
-项目仍在早期阶段。技术细节看 [HANDOFF.md](HANDOFF.md)。
-
-## 致谢
-
-- Sony 开源了 LDAC 编码器
-- BlueKitchen 的 BTstack 提供了高质量的用户态蓝牙栈
-- AOSP 的 `a2dp_vendor_ldac_encoder.cc` 是关键参考实现
+- **Sony** for releasing the LDAC encoder under Apache 2.0
+- **EHfive** for the [CMake-friendly libldac wrapper](https://github.com/EHfive/ldacBT)
+- **BlueKitchen GmbH** for [BTstack](https://github.com/bluekitchen/btstack)
+- **Omar Cornut** for [Dear ImGui](https://github.com/ocornut/imgui)
+- **Evan Pezent** for [ImPlot](https://github.com/epezent/implot)
+- **subframe7536** for [Maple Mono](https://github.com/subframe7536/Maple-font)
+- The **AOSP Bluetooth team** for the LDAC A2DP reference implementation
+- **Linux kernel firmware project** for the Realtek RTL8761BU blobs

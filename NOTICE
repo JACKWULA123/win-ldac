@@ -1,0 +1,102 @@
+win-ldac
+========
+Copyright 2026 win-ldac contributors
+
+This product includes software developed by the win-ldac contributors.
+
+It bundles, links against, or references the following third-party
+components. The original copyright notices and licence terms are
+preserved here as required.
+
+--------------------------------------------------------------------------
+1. libldac (Sony LDAC encoder)
+--------------------------------------------------------------------------
+Upstream:  https://android.googlesource.com/platform/external/libldac
+Packaged:  https://github.com/EHfive/ldacBT (git submodule at vendor/ldacBT)
+Licence:   Apache License, Version 2.0
+Copyright (C) 2003 - 2016 Sony Corporation
+
+Used to encode PCM into the LDAC bitstream that is sent over A2DP.
+The encoder source is fetched via `git submodule update --init` and
+compiled directly into the project — see CMakeLists.txt.
+
+--------------------------------------------------------------------------
+2. BTstack (Bluetooth host stack)
+--------------------------------------------------------------------------
+Upstream:  https://github.com/bluekitchen/btstack
+Licence:   BlueKitchen "free for non-commercial / personal use".
+           Commercial use requires a paid licence from BlueKitchen GmbH:
+           https://bluekitchen-gmbh.com/btstack/
+
+** BTstack is NOT redistributed in this repository. **
+Users must fetch it themselves into vendor/btstack/ before building.
+See README.md for the clone command and licence implications.
+
+This project's source code is licensed under Apache 2.0, but
+DISTRIBUTING COMPILED BINARIES that link against BTstack outside
+personal / non-commercial scope is restricted by BTstack's licence.
+Source distribution (this repository) and per-user local builds are
+not affected.
+
+--------------------------------------------------------------------------
+3. Dear ImGui
+--------------------------------------------------------------------------
+Upstream:  https://github.com/ocornut/imgui (git submodule at third_party/imgui)
+Licence:   MIT
+Copyright (c) 2014-2024 Omar Cornut
+
+Used for the GUI rendering. Linked statically into win-ldac.exe.
+
+--------------------------------------------------------------------------
+4. ImPlot
+--------------------------------------------------------------------------
+Upstream:  https://github.com/epezent/implot (git submodule at third_party/implot)
+Licence:   MIT
+Copyright (c) 2020 Evan Pezent
+
+Used for the 60-second bitrate line chart inside the GUI.
+
+--------------------------------------------------------------------------
+5. AOSP A2DP LDAC encoder glue (ported)
+--------------------------------------------------------------------------
+Upstream:  https://android.googlesource.com/platform/packages/modules/Bluetooth/+/refs/heads/main/system/stack/a2dp/
+Licence:   Apache License, Version 2.0
+
+core/src/a2dp_ldac/a2dp_ldac_source.c was ported from the AOSP A2DP
+LDAC encoder file. Original AOSP copyright notices are retained in the
+file headers.
+
+--------------------------------------------------------------------------
+6. Maple Mono (bundled UI font)
+--------------------------------------------------------------------------
+Upstream:  https://github.com/subframe7536/Maple-font
+Licence:   SIL Open Font Licence, Version 1.1
+           Full text in assets/OFL.txt
+Copyright: 2022 Maple Mono Project Authors
+
+Bundled as assets/MapleMono-Regular.ttf. The OFL allows free use,
+modification and bundling alongside any software (including
+proprietary), provided the font is not sold by itself and the licence
+text accompanies the font file. assets/OFL.txt satisfies clause (2).
+
+--------------------------------------------------------------------------
+7. Realtek RTL8761BU Bluetooth firmware
+--------------------------------------------------------------------------
+Upstream:  https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/tree/rtl_bt
+Licence:   Realtek WiFi firmware redistribution licence
+           Full text in firmware/LICENCE.rtlwifi_firmware.txt
+Copyright: Realtek Semiconductor Corporation
+
+Bundled as firmware/rtl8761bu_fw and firmware/rtl8761bu_config so RTL
+USB Bluetooth dongles work without external downloads. Redistribution
+is permitted by the Realtek licence; modification of the firmware is
+not.
+
+--------------------------------------------------------------------------
+8. Chart watermark and tray icon
+--------------------------------------------------------------------------
+Files:     assets/monkey.png, assets/pic.png, assets/win-ldac.ico
+Licence:   Open-source / free-use, per the project owner.
+
+If you re-use these assets outside this project, treat them as
+unspecified-licence and replace them with your own.

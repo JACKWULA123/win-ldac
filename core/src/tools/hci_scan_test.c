@@ -17,7 +17,7 @@
 // from scratch against the BTstack public headers but follows the same
 // state-machine pattern as that example. Distribution of a compiled
 // binary is restricted by BTstack's non-commercial license; see
-// HANDOFF.md §9.
+// docs/ARCHITECTURE.md §9.
 
 #include <stdint.h>
 #include <stdio.h>

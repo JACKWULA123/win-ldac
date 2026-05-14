@@ -1,6 +1,6 @@
-# Windows LDAC 项目交接文档
+# win-ldac Architecture & Design Notes
 
-> 本文档为项目的**唯一权威交接文件**。任何 AI 或开发者在任何阶段接手时，应**先完整阅读本文档**，再读 `STATUS.md` 了解当前进度，最后开始工作。每次重要变更后请更新本文档对应章节，并在 §1 追加一条"变更记录"。
+> 本文件是项目的**架构 / 设计参考**（前身：`HANDOFF.md`）。涵盖完整的组件清单、协议要点、构建依赖、license 约束。新接手的人应先读 [`README.md`](../README.md) 了解项目概况，再读本文件了解技术细节，最后看 [`STATUS.md`](../STATUS.md) 当前进度。
 
 ---
 
@@ -379,13 +379,18 @@ GUI 通过 §4.6 IPC 与 core 通信，**不**直接调用 core 任何函数。
 
 ```
 ldac/
-├── HANDOFF.md              ← 本文件
-├── STATUS.md               ← 滚动状态
-├── README.md               ← 给朋友看的 build / setup 指南
+├── README.md               ← GitHub 首页 / 用户面向 build & setup
+├── README.zh.md            ← 中文版 README
 ├── LICENSE                 ← Apache 2.0
+├── NOTICE                  ← 第三方组件版权 / 许可
+├── STATUS.md               ← 滚动里程碑状态
+├── build.ps1               ← 一键 build 脚本
 ├── CMakeLists.txt          ← 顶层
 ├── .gitignore
-├── .gitmodules             ← 只声明 vendor/ldacBT（不含 BTstack）
+├── .gitmodules             ← vendor/ldacBT + third_party/imgui + third_party/implot
+│                              (不含 BTstack — license 限制)
+├── docs/
+│   └── ARCHITECTURE.md     ← 本文件（前身 HANDOFF.md）
 │
 ├── firmware/               ← Realtek BT 固件（可分发，见 firmware/LICENCE...txt）
 │   ├── rtl8761bu_fw        ← RTL8761BU 主固件 (注意无 .bin 后缀, 见 §8 坑 13)
@@ -675,7 +680,7 @@ M? — 描述
 ```
 
 接手 AI 的开场动作：
-1. 读 `HANDOFF.md`（本文件）
+1. 读 `docs/ARCHITECTURE.md`（本文件）
 2. 读 `STATUS.md`
 3. `git status` 看工作区
 4. `git log --oneline -20`

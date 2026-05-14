@@ -2,6 +2,12 @@
 build/
 out/
 bin/
+
+# Portable test bundle assembled for hand-off to another machine.
+# Contains binary win-ldac.exe + VC++ runtime DLLs + assets + firmware.
+# Per the BTstack licence we don't redistribute compiled binaries, so
+# the bundle stays out of source control.
+dist/
 *.obj
 *.lib
 *.dll
@@ -22,11 +28,8 @@ CMakeUserPresets.json
 # User-fetched dependency (see HANDOFF.md §4.2; BTstack license forbids us bundling it)
 vendor/btstack/
 
-# User-fetched UI dependencies (Dear ImGui + ImPlot, both MIT-licensed).
-# Kept out of the tree to mirror the BTstack arrangement; see
-# third_party/README.md for clone instructions.
-third_party/imgui/
-third_party/implot/
+# (Dear ImGui and ImPlot are now tracked as git submodules — see
+# .gitmodules. The lines that used to exclude them have been removed.)
 
 # Bundled UI assets are now committed (Maple Mono under SIL OFL 1.1,
 # monkey + pic both open-source per the project owner). Anything other

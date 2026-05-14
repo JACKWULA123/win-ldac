@@ -1,31 +1,35 @@
 # third_party/
 
-User-fetched UI dependencies. **Not committed**: both libraries are
-MIT-licensed and small, but mirroring the BTstack arrangement keeps
-this repo's own footprint clean.
+UI dependencies for `win-ldac.exe`. Both are tracked as **git submodules**
+(see [`.gitmodules`](../.gitmodules)) — after `git clone --recursive` (or
+`git submodule update --init --recursive`) you should see populated
+directories here.
 
-The `gui/` CMakeLists.txt looks for the two folders below; if either
-is missing the GUI target is silently skipped (the CLI tools still
-build).
+## Contents
 
-## Setup
+| Path | Upstream | Licence | Pinned commit |
+|---|---|---|---|
+| `imgui/`  | [ocornut/imgui](https://github.com/ocornut/imgui)   | MIT | `b2546a5c` (post-v1.92.8) |
+| `implot/` | [epezent/implot](https://github.com/epezent/implot) | MIT | `1351ab2c` |
 
-From the repository root:
-
-```powershell
-git clone https://github.com/ocornut/imgui.git    third_party/imgui
-git clone https://github.com/epezent/implot.git   third_party/implot
-```
-
-Versions known to work:
-- Dear ImGui ≥ **1.92** (needs the dynamic-size `PushFont(font, size)` API)
-- ImPlot **HEAD as of 2026-05** (the `ImPlotSpec` constructor pattern)
-
-## Worktree note
-
-For builds out of `.claude/worktrees/*/`, create a junction back to the
-main repo's `third_party/`:
+Pinned to the commits the project was developed against. Bumping
+either is straightforward:
 
 ```powershell
-cmd /c "mklink /J third_party D:\path\to\ldac\third_party"
+cd third_party/imgui
+git fetch
+git checkout <new-commit>
+cd ../..
+git add third_party/imgui
+git commit -m "Bump imgui to <new-commit>"
 ```
+
+Just be aware that ImGui 1.92's dynamic-font-size `PushFont(font, size)`
+API is a hard requirement and ImPlot's `ImPlotSpec` constructor pattern
+is too — both pre-2024 releases will break the build.
+
+## Why not bundled directly
+
+Same logic as `vendor/btstack/`: keep the repo lean. Cloning the
+project pulls them automatically via submodule, so there's no extra
+manual step for end users.

@@ -83,10 +83,10 @@
 1. 顶层 `README.md`（中文优先 + 英文 build steps）
 2. `build.ps1` 一键脚本（cmake configure + build）
 3. CI / hardware 文档：哪些 dongle 已验证、Zadig 步骤、Memory Integrity 关闭说明
-4. HANDOFF.md §6 同步更新最新 build 命令
+4. docs/ARCHITECTURE.md §6 同步更新最新 build 命令
 
 ### 不做的
-- 不打包预编译二进制（HANDOFF §9 license 约定）
+- 不打包预编译二进制（docs/ARCHITECTURE.md §9 license 约定）
 - 不写自动 CI（朋友自编场景不需要）
 
 ## 已知问题

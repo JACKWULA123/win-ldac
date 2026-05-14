@@ -63,7 +63,7 @@ typedef struct {
 
     // Static-lifetime buffer for SET_CONFIGURATION. BTstack stores the
     // pointer (not the bytes), then constructs the AVDTP packet later
-    // after CAPABILITIES_COMPLETE. See HANDOFF.md §8 坑 / STATUS.md M4.
+    // after CAPABILITIES_COMPLETE. See docs/ARCHITECTURE.md §8 / STATUS.md M4.
     uint8_t  set_config_payload[A2DP_LDAC_CAPS_LEN];
     int      negotiated_sr_hz;
     uint8_t  negotiated_cm_bit;
