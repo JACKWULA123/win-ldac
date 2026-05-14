@@ -22,6 +22,16 @@ CMakeUserPresets.json
 # User-fetched dependency (see HANDOFF.md §4.2; BTstack license forbids us bundling it)
 vendor/btstack/
 
+# User-fetched UI dependencies (Dear ImGui + ImPlot, both MIT-licensed).
+# Kept out of the tree to mirror the BTstack arrangement; see
+# third_party/README.md for clone instructions.
+third_party/imgui/
+third_party/implot/
+
+# User-supplied UI assets (font + watermark image). See assets/README.md.
+assets/*
+!assets/README.md
+
 # Local test artifacts
 out.ldac
 *.wav

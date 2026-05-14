@@ -68,6 +68,7 @@ typedef struct {
     engine_bitrate_mode_t bitrate_mode;
     uint64_t              underrun_samples;
     int                   reconnect_attempts;
+    bool                  idle_paused;       // AVDTP-suspended on silence; audio not flowing
 } engine_status_t;
 
 // ── Config ─────────────────────────────────────────────────────────────
@@ -109,6 +110,11 @@ void engine_get_status_snapshot(engine_status_t* out);
 // thread or any other.
 
 void engine_post_set_bitrate_mode(engine_bitrate_mode_t mode);
+
+// Drop the current A2DP link and let the reconnect supervisor try
+// again on its normal cadence. Used by the GUI "Disconnect / reconnect
+// now" button. No-op if no link is up.
+void engine_post_disconnect(void);
 
 // Change the target XM5. The current connection (if any) is dropped
 // and the supervisor will start trying the new address. Used by the

@@ -274,6 +274,7 @@ void engine_get_status_snapshot(engine_status_t* out) {
     out->bitrate_mode       = e.bitrate_mode;
     out->underrun_samples   = a2dp_ldac_source_underrun_samples();
     out->reconnect_attempts = reconnect_supervisor_attempt_count();
+    out->idle_paused        = a2dp_ldac_source_is_idle_paused();
     LeaveCriticalSection(&e.snapshot_lock);
 }
 
@@ -326,6 +327,22 @@ static void on_bt_thread_set_target(void* arg) {
     } else {
         reconnect_supervisor_note_disconnected();
     }
+}
+
+static btstack_context_callback_registration_t disconnect_cb_storage;
+static void on_bt_thread_disconnect(void* arg) {
+    (void)arg;
+    if (e.a2dp_cid) {
+        log_line("[engine] user requested disconnect");
+        a2dp_source_disconnect(e.a2dp_cid);
+    } else {
+        log_line("[engine] disconnect requested but no link up");
+    }
+}
+void engine_post_disconnect(void) {
+    disconnect_cb_storage.callback = &on_bt_thread_disconnect;
+    disconnect_cb_storage.context  = NULL;
+    btstack_run_loop_execute_on_main_thread(&disconnect_cb_storage);
 }
 
 void engine_post_set_target(const bd_addr_t addr) {
@@ -471,13 +488,15 @@ static void hci_packet_handler(uint8_t pt, uint16_t ch,
         } else if (st == HCI_STATE_OFF) {
             log_line("[engine] HCI off");
             snapshot_set_state(ENGINE_STATE_STOPPING);
-            exit(0);
+            btstack_run_loop_trigger_exit();
         }
         break;
     }
     case BTSTACK_EVENT_POWERON_FAILED:
         log_line("[engine] HCI power on failed");
-        exit(3);
+        snapshot_set_state(ENGINE_STATE_STOPPING);
+        btstack_run_loop_trigger_exit();
+        break;
 
     case HCI_EVENT_DISCONNECTION_COMPLETE:
         log_line("[engine] HCI baseband disconnected");

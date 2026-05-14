@@ -88,7 +88,12 @@ else()
 endif()
 
 # ─────────────────────────────────────────────────────────────
-#  core: the headless engine. GUI is a separate target added
-#  in a future milestone.
+#  core: the headless engine + CLI tools.
 # ─────────────────────────────────────────────────────────────
 add_subdirectory(core)
+
+# ─────────────────────────────────────────────────────────────
+#  gui: win-ldac.exe — Dear ImGui + DX11 desktop front-end.
+#  Built only if BTstack and third_party/imgui+implot are present.
+# ─────────────────────────────────────────────────────────────
+add_subdirectory(gui)
