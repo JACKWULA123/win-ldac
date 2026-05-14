@@ -115,7 +115,7 @@ If the headphones speak LDAC, this should work.
 ### Clone + dependencies
 
 ```powershell
-git clone --recursive https://github.com/YOUR_GITHUB_USERNAME/win-ldac.git
+git clone --recursive https://github.com/JACKWULA123/win-ldac.git
 cd win-ldac
 
 # BTstack is user-fetched on purpose — see "Licence" above.

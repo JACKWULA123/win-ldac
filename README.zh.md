@@ -92,7 +92,7 @@ Windows 自带蓝牙栈只做 SBC（~328 kbps）。LDAC 在 Windows 上历来只
 ### 拉代码 + 依赖
 
 ```powershell
-git clone --recursive https://github.com/YOUR_GITHUB_USERNAME/win-ldac.git
+git clone --recursive https://github.com/JACKWULA123/win-ldac.git
 cd win-ldac
 
 # BTstack 故意不放在仓库里（见上面"许可"一节），用户自行 clone：
