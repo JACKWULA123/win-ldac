@@ -63,7 +63,7 @@ if(HAVE_BTSTACK)
         src/ldac/ldac_wrapper.c
     )
     target_include_directories(ldac_wrapper PUBLIC src)
-    target_link_libraries(ldac_wrapper PUBLIC ldac_enc)
+    target_link_libraries(ldac_wrapper PUBLIC ldac_enc ldac_abr)
 
     add_library(a2dp_ldac_source STATIC
         src/a2dp_ldac/a2dp_ldac_caps.c
@@ -105,4 +105,23 @@ if(HAVE_BTSTACK)
     target_link_libraries(a2dp_ldac_persistent_test
         PRIVATE btstack wasapi_loopback a2dp_ldac_source bt_link_key_db
                 reconnect_supervisor)
+
+    # M7: the headless engine. Bundles all the BTstack/A2DP/WASAPI/LDAC
+    # plumbing behind a small API (engine_init/run/stop + a snapshot
+    # query + cross-thread command posts). Both the CLI test tool and
+    # the upcoming Dear ImGui GUI link this library; the engine itself
+    # is GUI-agnostic.
+    add_library(core_engine STATIC
+        src/engine/engine.c
+    )
+    target_include_directories(core_engine PUBLIC src)
+    target_link_libraries(core_engine
+        PUBLIC btstack wasapi_loopback a2dp_ldac_source bt_link_key_db
+               reconnect_supervisor)
+
+    add_executable(engine_persistent_test
+        src/tools/engine_persistent_test.c
+    )
+    target_include_directories(engine_persistent_test PRIVATE src)
+    target_link_libraries(engine_persistent_test PRIVATE core_engine)
 endif()

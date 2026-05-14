@@ -2,8 +2,16 @@
 //
 // Single producer (the capture thread we start), single consumer (the
 // caller of read()). A mutex-protected ring buffer is more than fast
-// enough at 48 kHz * 2 ch = 192 kB/s — atomics give ~no benefit at this
-// rate and complicate the code, so we keep it boring.
+// enough at 96 kHz * 2 ch * 4 byte/float = 768 kB/s — atomics give
+// ~no benefit at this rate and complicate the code, so we keep it
+// boring.
+//
+// Internal format change (M7): the ring buffer now stores float32.
+// The LDAC path consumes it directly (LDACBT_SMPL_FMT_F32), which
+// avoids the float→s16 truncation that used to cap the pipeline at
+// 16-bit precision regardless of the user's Hi-Res sources. The s16
+// reader still works for the SBC-era tools, doing the truncation only
+// at the read boundary so it doesn't pollute the new path.
 //
 // COM details:
 //   - We init COM as MTA inside the capture thread.
@@ -15,6 +23,10 @@
 //   - When no app is playing, WASAPI signals the event handle but
 //     returns AUDCLNT_BUFFERFLAGS_SILENT — we still push the silence
 //     into the ring buffer to keep the timing tight.
+//   - AUDCLNT_E_DEVICE_INVALIDATED can come back from GetBuffer when
+//     the user changes Sound Properties or unplugs the device. We
+//     surface it via an optional callback so the engine can rebuild
+//     the WASAPI session at the new format.
 
 #include "wasapi_loopback.h"
 
@@ -27,21 +39,28 @@
 #include <thread>
 #include <vector>
 
+// INITGUID + initguid.h causes PROPERTYKEY constants declared in
+// functiondiscoverykeys_devpkey.h (and the IID_* / KSDATAFORMAT_SUBTYPE_*
+// GUIDs from the COM headers) to be locally defined here instead of
+// only forward-declared. Without this we'd need to link propsys.lib.
+#define INITGUID
 #include <windows.h>
+#include <initguid.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
-#include <ksmedia.h>  // KSDATAFORMAT_SUBTYPE_*
+#include <ksmedia.h>            // KSDATAFORMAT_SUBTYPE_*
+#include <functiondiscoverykeys_devpkey.h>  // PKEY_AudioEngine_DeviceFormat
 
 #pragma comment(lib, "ole32.lib")
 
 namespace {
 
-// ─── A boring mutex-protected ring buffer ────────────────────────────
+// ─── Boring mutex-protected ring buffer (float32) ────────────────────
 class PcmRing {
  public:
     explicit PcmRing(size_t capacity_samples) : buf_(capacity_samples) {}
 
-    size_t write(const int16_t* p, size_t n) {
+    size_t write(const float* p, size_t n) {
         std::lock_guard<std::mutex> lk(m_);
         size_t can = (std::min)(n, buf_.size() - count_);
         for (size_t i = 0; i < can; ++i) {
@@ -51,22 +70,35 @@ class PcmRing {
         count_ += can;
         return can;
     }
-    // Write `n` zero samples. Used for AUDCLNT_BUFFERFLAGS_SILENT packets.
     size_t write_silence(size_t n) {
         std::lock_guard<std::mutex> lk(m_);
         size_t can = (std::min)(n, buf_.size() - count_);
         for (size_t i = 0; i < can; ++i) {
-            buf_[tail_] = 0;
+            buf_[tail_] = 0.0f;
             tail_ = (tail_ + 1) % buf_.size();
         }
         count_ += can;
         return can;
     }
-    size_t read(int16_t* p, size_t n) {
+    size_t read_f32(float* p, size_t n) {
         std::lock_guard<std::mutex> lk(m_);
         size_t can = (std::min)(n, count_);
         for (size_t i = 0; i < can; ++i) {
             p[i] = buf_[head_];
+            head_ = (head_ + 1) % buf_.size();
+        }
+        count_ -= can;
+        return can;
+    }
+    // float→s16 truncation done on the read boundary for SBC tools.
+    size_t read_s16(int16_t* p, size_t n) {
+        std::lock_guard<std::mutex> lk(m_);
+        size_t can = (std::min)(n, count_);
+        for (size_t i = 0; i < can; ++i) {
+            float v = buf_[head_];
+            if (v >  1.0f) v =  1.0f;
+            if (v < -1.0f) v = -1.0f;
+            p[i] = static_cast<int16_t>(v * 32767.0f);
             head_ = (head_ + 1) % buf_.size();
         }
         count_ -= can;
@@ -78,11 +110,11 @@ class PcmRing {
     }
 
  private:
-    std::vector<int16_t> buf_;
-    size_t               head_  = 0;
-    size_t               tail_  = 0;
-    size_t               count_ = 0;
-    std::mutex           m_;
+    std::vector<float> buf_;
+    size_t             head_  = 0;
+    size_t             tail_  = 0;
+    size_t             count_ = 0;
+    std::mutex         m_;
 };
 
 // ─── Module state ────────────────────────────────────────────────────
@@ -100,6 +132,8 @@ struct State {
     bool                 is_s16        = false;
     int                  sample_rate   = 0;
     int                  channels      = 0;
+    int                  device_bit_depth = 0;
+    wasapi_loopback_invalidated_fn invalidated_cb = nullptr;
 };
 
 State* g = nullptr;
@@ -132,13 +166,38 @@ bool detect_format(WAVEFORMATEX* wf, bool* is_float, bool* is_s16) {
     return false;
 }
 
-// Convert a single interleaved frame of IEEE float to interleaved s16.
-inline void float_to_s16(const float* in, int16_t* out, size_t n_samples) {
+// Read the device's nominal "Default Format" from the property store.
+// This is what Windows Sound Properties → Advanced shows in the dropdown
+// (16-bit / 24-bit / 32-bit, paired with a sample rate). The engine's
+// internal mix format is always float32, so GetMixFormat doesn't tell
+// us this; we have to ask the endpoint directly.
+//
+// Returns 16/24/32 on success, 0 on failure.
+int read_endpoint_bit_depth(IMMDevice* device) {
+    if (!device) return 0;
+    IPropertyStore* props = nullptr;
+    HRESULT hr = device->OpenPropertyStore(STGM_READ, &props);
+    if (FAILED(hr) || !props) return 0;
+    int result = 0;
+    PROPVARIANT pv;
+    PropVariantInit(&pv);
+    hr = props->GetValue(PKEY_AudioEngine_DeviceFormat, &pv);
+    if (SUCCEEDED(hr) && pv.vt == VT_BLOB && pv.blob.cbSize >= sizeof(WAVEFORMATEX)) {
+        const WAVEFORMATEX* wf =
+            reinterpret_cast<const WAVEFORMATEX*>(pv.blob.pBlobData);
+        result = static_cast<int>(wf->wBitsPerSample);
+    }
+    PropVariantClear(&pv);
+    props->Release();
+    return result;
+}
+
+// Convert one interleaved frame of int16 PCM to interleaved float32.
+// Used when WASAPI's mix format is the (rare) 16-bit PCM case.
+inline void s16_to_float(const int16_t* in, float* out, size_t n_samples) {
+    constexpr float k = 1.0f / 32768.0f;
     for (size_t i = 0; i < n_samples; ++i) {
-        float v = in[i];
-        if (v >  1.0f) v =  1.0f;
-        if (v < -1.0f) v = -1.0f;
-        out[i] = static_cast<int16_t>(v * 32767.0f);
+        out[i] = static_cast<float>(in[i]) * k;
     }
 }
 
@@ -157,7 +216,7 @@ void capture_thread_main() {
     }
 
     const int channels = g->channels;
-    std::vector<int16_t> scratch(8192);  // grows if needed
+    std::vector<float> scratch(8192);  // grows if needed
 
     while (!g->stop_flag.load(std::memory_order_relaxed)) {
         DWORD wr = WaitForSingleObject(g->event, 200);
@@ -167,33 +226,44 @@ void capture_thread_main() {
         UINT32 packet_size = 0;
         while (true) {
             hr = g->capture->GetNextPacketSize(&packet_size);
+            if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
+                std::fprintf(stderr, "[wasapi] device invalidated — "
+                                     "notifying engine\n");
+                if (g->invalidated_cb) g->invalidated_cb();
+                goto thread_exit;
+            }
             if (FAILED(hr) || packet_size == 0) break;
 
             BYTE*  data   = nullptr;
             UINT32 frames = 0;
             DWORD  flags  = 0;
             hr = g->capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
+            if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
+                std::fprintf(stderr, "[wasapi] device invalidated — "
+                                     "notifying engine\n");
+                if (g->invalidated_cb) g->invalidated_cb();
+                goto thread_exit;
+            }
             if (FAILED(hr)) break;
 
             size_t samples = static_cast<size_t>(frames) * channels;
 
             if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
                 g->ring->write_silence(samples);
-            } else {
+            } else if (g->is_float) {
+                // Zero-copy float32 path.
+                g->ring->write(reinterpret_cast<const float*>(data), samples);
+            } else if (g->is_s16) {
                 if (scratch.size() < samples) scratch.resize(samples);
-                if (g->is_float) {
-                    float_to_s16(reinterpret_cast<const float*>(data),
-                                 scratch.data(), samples);
-                    g->ring->write(scratch.data(), samples);
-                } else if (g->is_s16) {
-                    g->ring->write(reinterpret_cast<const int16_t*>(data),
-                                   samples);
-                }
+                s16_to_float(reinterpret_cast<const int16_t*>(data),
+                             scratch.data(), samples);
+                g->ring->write(scratch.data(), samples);
             }
             g->capture->ReleaseBuffer(frames);
         }
     }
 
+thread_exit:
     g->audio_client->Stop();
     CoUninitialize();
 }
@@ -253,8 +323,9 @@ extern "C" int wasapi_loopback_init(int* out_sample_rate, int* out_channels) {
         return -3;
     }
 
-    s->sample_rate = static_cast<int>(s->mix_format->nSamplesPerSec);
-    s->channels    = static_cast<int>(s->mix_format->nChannels);
+    s->sample_rate      = static_cast<int>(s->mix_format->nSamplesPerSec);
+    s->channels         = static_cast<int>(s->mix_format->nChannels);
+    s->device_bit_depth = read_endpoint_bit_depth(s->device);
 
     // LDAC supports {44.1, 48, 88.2, 96} kHz; anything else needs a
     // resampler, which we don't implement. SBC tools only handle the
@@ -316,7 +387,8 @@ extern "C" int wasapi_loopback_init(int* out_sample_rate, int* out_channels) {
     }
 
     // ~0.5 s of stereo PCM as a generous safety margin against scheduling
-    // jitter on either thread. At 48k stereo s16 that's ~96 KB.
+    // jitter on either thread. At 96k stereo float32 that's ~384 KB —
+    // still tiny.
     s->ring = new PcmRing(static_cast<size_t>(s->sample_rate)
                           * s->channels / 2);
 
@@ -337,6 +409,10 @@ fail:
     delete s;
     if (com_inited) CoUninitialize();
     return -1;
+}
+
+extern "C" int wasapi_loopback_device_bit_depth(void) {
+    return g ? g->device_bit_depth : 0;
 }
 
 extern "C" int wasapi_loopback_start(void) {
@@ -366,12 +442,23 @@ extern "C" void wasapi_loopback_stop(void) {
     CoUninitialize();
 }
 
+extern "C" size_t wasapi_loopback_read_f32(float* out, size_t n) {
+    if (!g || !g->ring) return 0;
+    return g->ring->read_f32(out, n);
+}
+
 extern "C" size_t wasapi_loopback_read(int16_t* out, size_t n) {
     if (!g || !g->ring) return 0;
-    return g->ring->read(out, n);
+    return g->ring->read_s16(out, n);
 }
 
 extern "C" size_t wasapi_loopback_available(void) {
     if (!g || !g->ring) return 0;
     return g->ring->available();
+}
+
+extern "C" void wasapi_loopback_set_invalidated_callback(
+        wasapi_loopback_invalidated_fn fn) {
+    if (!g) return;
+    g->invalidated_cb = fn;
 }

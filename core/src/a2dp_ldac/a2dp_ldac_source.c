@@ -10,10 +10,24 @@
 // timer's only job is to keep `samples_owed` topped up from elapsed
 // real time so the encoder always has PCM to feed.
 //
-// M5 v1 puts exactly one LDAC transport frame in each AVDTP packet. The
-// LDAC media payload header byte therefore always has frame_count=1 and
-// all fragmentation flags clear. Batching multiple frames per packet is
-// an easy follow-up if/when MTU > 2 * frame_size — left for later.
+// One LDAC transport frame per AVDTP packet (frame_count=1, flags=0).
+// Batching multiple frames is an easy follow-up if/when MTU is large
+// enough; in the wild XM5's MTU just fits one frame at HQ.
+//
+// M7 telemetry
+// ------------
+// Two counters power the GUI's live displays and the ABR loop:
+//
+//   `bytes_sent_total` — bytes successfully handed to BTstack (status =
+//     SUCCESS from a2dp_source_stream_send_media_payload_rtp). A 1-second
+//     sliding sample gives the "effective kbps" the user sees in the
+//     chart.
+//
+//   `outstanding_packets` — packets we asked BTstack to send for which
+//     CAN_SEND_NOW hasn't fired yet. This is our standin for an L2CAP
+//     queue depth (BTstack doesn't expose it); it grows when the BT
+//     link slows and shrinks when it catches up, exactly what
+//     ldac_ABR_Proc wants.
 
 #include "a2dp_ldac/a2dp_ldac_source.h"
 
@@ -31,6 +45,10 @@
 #define LDAC_CHANNELS               2     // M5 stereo only
 #define LDAC_MEDIA_PAYLOAD_HDR_LEN  1     // F/S/L flags + frame count
 
+// ABR / effective-rate book-keeping.
+#define ABR_PROC_INTERVAL_MS        100   // how often we call ldac_ABR_Proc
+#define EFFECTIVE_KBPS_WINDOW_MS    1000  // sliding window for the GUI number
+
 // ── Module state ───────────────────────────────────────────────────────
 typedef struct {
     bool                  initialised;
@@ -39,6 +57,8 @@ typedef struct {
     int                   sample_rate_hz;
     int                   samples_per_ldac_frame;  // 128 (<=48k) or 256 (>=88.2k)
     int                   max_payload_size;        // from BTstack
+    int                   initial_eqmid;           // EQMID configured at setup()
+    a2dp_ldac_bitrate_mode_t bitrate_mode;
     ldac_wrapper_t*       enc;
     a2dp_ldac_source_pull_pcm_fn pull_pcm;
 
@@ -61,13 +81,23 @@ typedef struct {
     bool                  streaming;
     uint32_t              rtp_timestamp;
     uint64_t              underrun_samples;
+
+    // Telemetry / ABR.
+    uint64_t              bytes_sent_total;        // strictly monotonic
+    uint64_t              bytes_sent_at_window_start;
+    uint32_t              window_start_ms;
+    int                   effective_kbps;          // last-computed value
+    int                   outstanding_packets;     // requested but not yet CAN_SEND-ed
+    btstack_timer_source_t abr_timer;
 } state_t;
 static state_t s;
 
 // ── Forward decls ──────────────────────────────────────────────────────
 static void audio_timer_handler(btstack_timer_source_t* ts);
+static void abr_timer_handler(btstack_timer_source_t* ts);
 static void pump_until_packet_ready(void);
 static void send_current_packet(void);
+static void recompute_effective_kbps(uint32_t now_ms);
 
 // ── Helpers ────────────────────────────────────────────────────────────
 static int samples_per_frame_for_rate(int hz) {
@@ -82,7 +112,7 @@ int a2dp_ldac_source_setup(uint16_t a2dp_cid,
                            uint8_t  local_seid,
                            int      sample_rate_hz,
                            uint8_t  channel_mode_a2dp_bit,
-                           int      eqmid,
+                           a2dp_ldac_bitrate_mode_t mode,
                            a2dp_ldac_source_pull_pcm_fn pull_pcm) {
     if (s.initialised) {
         fprintf(stderr, "[a2dp_ldac_source] already initialised\n");
@@ -129,8 +159,12 @@ int a2dp_ldac_source_setup(uint16_t a2dp_cid,
         return -1;
     }
 
+    // Always create the encoder at HQ; ABR (if enabled) will move it
+    // around. This way fixed→adaptive→fixed mode toggles are no-op
+    // safe.
+    int initial_eqmid = 0;  // LDACBT_EQMID_HQ
     ldac_wrapper_t* enc = ldac_wrapper_create(
-        mtu_for_libldac, eqmid, cm_libldac, sample_rate_hz);
+        mtu_for_libldac, initial_eqmid, cm_libldac, sample_rate_hz);
     if (!enc) {
         fprintf(stderr, "[a2dp_ldac_source] ldac_wrapper_create failed\n");
         return -1;
@@ -143,8 +177,18 @@ int a2dp_ldac_source_setup(uint16_t a2dp_cid,
     s.sample_rate_hz         = sample_rate_hz;
     s.samples_per_ldac_frame = samples_per_frame_for_rate(sample_rate_hz);
     s.max_payload_size       = payload;
+    s.initial_eqmid          = initial_eqmid;
+    s.bitrate_mode           = mode;
     s.enc                    = enc;
     s.pull_pcm               = pull_pcm;
+
+    if (mode == A2DP_LDAC_BITRATE_ADAPTIVE) {
+        if (ldac_wrapper_abr_enable(s.enc, ABR_PROC_INTERVAL_MS) != 0) {
+            fprintf(stderr,
+                "[a2dp_ldac_source] ABR init failed; falling back to fixed HQ\n");
+            s.bitrate_mode = A2DP_LDAC_BITRATE_FIXED_HQ;
+        }
+    }
     return 0;
 }
 
@@ -158,11 +202,21 @@ void a2dp_ldac_source_start(void) {
     s.packet_frame_count = 0;
     s.packet_pending    = false;
     s.underrun_samples  = 0;
+    s.bytes_sent_total  = 0;
+    s.bytes_sent_at_window_start = 0;
+    s.window_start_ms   = btstack_run_loop_get_time_ms();
+    s.effective_kbps    = 0;
+    s.outstanding_packets = 0;
 
     btstack_run_loop_remove_timer(&s.audio_timer);
     btstack_run_loop_set_timer_handler(&s.audio_timer, &audio_timer_handler);
     btstack_run_loop_set_timer(&s.audio_timer, AUDIO_TIMER_MS);
     btstack_run_loop_add_timer(&s.audio_timer);
+
+    btstack_run_loop_remove_timer(&s.abr_timer);
+    btstack_run_loop_set_timer_handler(&s.abr_timer, &abr_timer_handler);
+    btstack_run_loop_set_timer(&s.abr_timer, ABR_PROC_INTERVAL_MS);
+    btstack_run_loop_add_timer(&s.abr_timer);
 }
 
 void a2dp_ldac_source_stop(void) {
@@ -173,7 +227,9 @@ void a2dp_ldac_source_stop(void) {
     s.packet_byte_count = 0;
     s.packet_frame_count = 0;
     s.packet_pending    = false;
+    s.outstanding_packets = 0;
     btstack_run_loop_remove_timer(&s.audio_timer);
+    btstack_run_loop_remove_timer(&s.abr_timer);
 }
 
 void a2dp_ldac_source_teardown(void) {
@@ -186,13 +242,35 @@ void a2dp_ldac_source_teardown(void) {
     memset(&s, 0, sizeof(s));
 }
 
+void a2dp_ldac_source_set_bitrate_mode(a2dp_ldac_bitrate_mode_t mode) {
+    if (!s.initialised) return;
+    if (s.bitrate_mode == mode) return;
+    s.bitrate_mode = mode;
+    if (mode == A2DP_LDAC_BITRATE_ADAPTIVE) {
+        if (ldac_wrapper_abr_enable(s.enc, ABR_PROC_INTERVAL_MS) != 0) {
+            fprintf(stderr,
+                "[a2dp_ldac_source] ABR init failed; reverting to fixed HQ\n");
+            s.bitrate_mode = A2DP_LDAC_BITRATE_FIXED_HQ;
+        }
+    } else {
+        ldac_wrapper_abr_disable(s.enc);
+        // Snap back to HQ when leaving adaptive mode.
+        ldac_wrapper_set_eqmid(s.enc, s.initial_eqmid);
+    }
+}
+
 void a2dp_ldac_source_on_can_send_now(void) {
     if (!s.initialised || !s.streaming) return;
     if (s.packet_frame_count == 0) {
         s.packet_pending = false;
+        if (s.outstanding_packets > 0) s.outstanding_packets--;
         return;
     }
     send_current_packet();
+    // BTstack issuing CAN_SEND_NOW means it drained one of our pending
+    // requests. Account for it before requesting again in
+    // pump_until_packet_ready.
+    if (s.outstanding_packets > 0) s.outstanding_packets--;
     // After the send, try to immediately build the next one if there's
     // enough PCM buffered. This is what keeps us in sync at high
     // bitrates (HQ@48k = 375 packets/sec, way too fast for the timer
@@ -204,12 +282,35 @@ uint64_t a2dp_ldac_source_underrun_samples(void) {
     return s.underrun_samples;
 }
 
-int a2dp_ldac_source_current_bitrate_kbps(void) {
-    return s.enc ? ldac_wrapper_current_bitrate_kbps(s.enc) : 0;
-}
-
 int a2dp_ldac_source_negotiated_sample_rate(void) {
     return s.sample_rate_hz;
+}
+
+int a2dp_ldac_source_nominal_kbps(void) {
+    if (!s.enc) return 0;
+    return ldac_wrapper_nominal_kbps(
+        ldac_wrapper_current_eqmid(s.enc), s.sample_rate_hz);
+}
+
+int a2dp_ldac_source_effective_kbps(void) {
+    // Refresh the sliding window so a quiet reader still gets fresh
+    // numbers without having to wait for the next ABR timer.
+    if (s.initialised && s.streaming) {
+        recompute_effective_kbps(btstack_run_loop_get_time_ms());
+    }
+    return s.effective_kbps;
+}
+
+int a2dp_ldac_source_outstanding_packets(void) {
+    return s.outstanding_packets;
+}
+
+int a2dp_ldac_source_current_eqmid(void) {
+    return s.enc ? ldac_wrapper_current_eqmid(s.enc) : -1;
+}
+
+a2dp_ldac_bitrate_mode_t a2dp_ldac_source_current_bitrate_mode(void) {
+    return s.bitrate_mode;
 }
 
 // ── Internals ──────────────────────────────────────────────────────────
@@ -233,6 +334,8 @@ static void send_current_packet(void) {
         fprintf(stderr,
             "[a2dp_ldac_source] send_media_payload_rtp status=0x%02x\n",
             status);
+    } else {
+        s.bytes_sent_total += (uint64_t)total_len;
     }
     s.rtp_timestamp     += (uint32_t)s.packet_frame_count
                            * (uint32_t)s.samples_per_ldac_frame;
@@ -248,12 +351,12 @@ static void pump_until_packet_ready(void) {
     if (!s.streaming || s.packet_pending) return;
 
     while (s.samples_owed >= (uint32_t)LDAC_PCM_FRAMES_PER_CALL) {
-        // Pull exactly one libldac chunk's worth of interleaved s16 PCM.
-        int16_t pcm[LDAC_PCM_FRAMES_PER_CALL * LDAC_CHANNELS];
+        // Pull exactly one libldac chunk's worth of interleaved float PCM.
+        float pcm[LDAC_PCM_FRAMES_PER_CALL * LDAC_CHANNELS];
         size_t requested = LDAC_PCM_FRAMES_PER_CALL * LDAC_CHANNELS;
         size_t got       = s.pull_pcm(pcm, requested);
         if (got < requested) {
-            memset(pcm + got, 0, (requested - got) * sizeof(int16_t));
+            memset(pcm + got, 0, (requested - got) * sizeof(float));
             s.underrun_samples += (requested - got);
         }
 
@@ -292,10 +395,21 @@ static void pump_until_packet_ready(void) {
         // M5 keeps it at exactly one frame per AVDTP packet (see file
         // header). As soon as we have a frame, request a send.
         s.packet_pending = true;
+        s.outstanding_packets++;
         a2dp_source_stream_endpoint_request_can_send_now(
             s.a2dp_cid, s.local_seid);
         return;
     }
+}
+
+static void recompute_effective_kbps(uint32_t now_ms) {
+    uint32_t dt_ms = now_ms - s.window_start_ms;
+    if (dt_ms < EFFECTIVE_KBPS_WINDOW_MS) return;
+    uint64_t delta_bytes = s.bytes_sent_total - s.bytes_sent_at_window_start;
+    // bytes * 8 / ms = kilo-bits-per-second.
+    s.effective_kbps = (int)((delta_bytes * 8) / dt_ms);
+    s.bytes_sent_at_window_start = s.bytes_sent_total;
+    s.window_start_ms            = now_ms;
 }
 
 static void audio_timer_handler(btstack_timer_source_t* ts) {
@@ -326,4 +440,22 @@ static void audio_timer_handler(btstack_timer_source_t* ts) {
     s.samples_owed += whole;
 
     pump_until_packet_ready();
+}
+
+// Driven on its own 100 ms cadence: updates the effective-kbps window
+// and (if ABR is enabled) lets libldac's ABR re-evaluate the EQMID.
+static void abr_timer_handler(btstack_timer_source_t* ts) {
+    btstack_run_loop_set_timer(ts, ABR_PROC_INTERVAL_MS);
+    btstack_run_loop_add_timer(ts);
+    if (!s.streaming) return;
+
+    uint32_t now = btstack_run_loop_get_time_ms();
+    recompute_effective_kbps(now);
+
+    if (s.bitrate_mode == A2DP_LDAC_BITRATE_ADAPTIVE && s.enc &&
+        ldac_wrapper_abr_is_enabled(s.enc)) {
+        // outstanding_packets is "what we asked for that hasn't gone out
+        // yet" — exactly what ABR considers a "TX queue depth".
+        ldac_wrapper_abr_proc(s.enc, (unsigned int)s.outstanding_packets);
+    }
 }

@@ -112,6 +112,14 @@ static bool resolve_firmware_folder(char* out, size_t out_sz) {
 // Reset per-link state so the next negotiation starts clean. Used both
 // at startup and on every disconnect/reconnect cycle. Does NOT touch
 // WASAPI — that stays running for the program's lifetime.
+//
+// Important: we deliberately do NOT clear negotiated_sr_hz /
+// negotiated_cm_bit / set_config_payload. BTstack sometimes skips the
+// OTHER_CAPABILITY emit on quick reconnects (M6.2 surfaced this as the
+// "cid 0x0002 channel mode 0x00" failure), and the XM5's LDAC caps are
+// stable per device anyway. Keeping the cached values means a "no
+// capability re-advertisement" reconnect can still go through using
+// what we learned on the first successful negotiation.
 static void reset_link_state(void) {
     if (link.streaming_started) {
         a2dp_ldac_source_stop();
@@ -124,10 +132,8 @@ static void reset_link_state(void) {
     link.ldac_capability_seen = false;
     link.config_applied       = false;
     link.streaming_started    = false;
-    link.negotiated_sr_hz     = 0;
-    link.negotiated_cm_bit    = 0;
-    // set_config_payload[] is left alone; it'll be overwritten before
-    // BTstack reads it on the next set_config_other call.
+    // Intentionally preserved: negotiated_sr_hz, negotiated_cm_bit,
+    // set_config_payload[].
 }
 
 // Attempt callback invoked by the supervisor. Called from the run-loop
@@ -311,12 +317,24 @@ static void a2dp_source_handler(uint8_t pt, uint16_t ch,
         }
         link.stream_opened = true;
 
+        if (link.negotiated_sr_hz == 0 || link.negotiated_cm_bit == 0) {
+            // OTHER_CAPABILITY was never delivered on this connection
+            // and we have no cached value from a prior session. Can't
+            // configure the encoder without it — disconnect so the
+            // supervisor retries; usually the next attempt does get the
+            // capability event.
+            fprintf(stderr,
+                "[!!] STREAM_ESTABLISHED before LDAC capability seen — "
+                "disconnecting & retrying\n");
+            a2dp_source_disconnect(link.a2dp_cid);
+            break;
+        }
         int rc = a2dp_ldac_source_setup(
             link.a2dp_cid, link.local_seid,
             link.negotiated_sr_hz,
             link.negotiated_cm_bit,
-            /*eqmid=*/0,  // 0 = LDACBT_EQMID_HQ
-            wasapi_loopback_read);
+            A2DP_LDAC_BITRATE_FIXED_HQ,
+            wasapi_loopback_read_f32);
         if (rc != 0) {
             fprintf(stderr,
                 "[!!] a2dp_ldac_source_setup failed — disconnecting\n");
