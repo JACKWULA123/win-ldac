@@ -60,12 +60,22 @@ int  a2dp_ldac_source_setup(uint16_t a2dp_cid,
                             a2dp_ldac_bitrate_mode_t mode,
                             a2dp_ldac_source_pull_pcm_fn pull_pcm);
 
-// Start the audio timer. Call from A2DP_SUBEVENT_STREAM_STARTED.
+// Start the audio timer. Call from A2DP_SUBEVENT_STREAM_STARTED right
+// after setup. Idempotent: also called by the engine on STREAM_STARTED
+// after a silence-driven resume.
 void a2dp_ldac_source_start(void);
 
 // Pause the audio timer and discard any half-built packet. Encoder
-// state is preserved so streaming can resume with start().
+// state is preserved so streaming can resume with start(). Used on
+// stream release / disconnect — *not* on silence-pause (that path goes
+// through a2dp_ldac_source_on_avdtp_suspended).
 void a2dp_ldac_source_stop(void);
+
+// Engine notifications for AVDTP SUSPEND/START round-trips. Unlike
+// stop()/start() these keep the audio timer running so the silence
+// detector can resume the stream as soon as audio reappears.
+void a2dp_ldac_source_on_avdtp_suspended(void);
+void a2dp_ldac_source_on_avdtp_started(void);
 
 // On A2DP_SUBEVENT_STREAMING_CAN_SEND_MEDIA_PACKET_NOW, hand off the
 // staged AVDTP packet to BTstack and try to build the next one
@@ -108,6 +118,11 @@ int      a2dp_ldac_source_outstanding_packets(void);
 int      a2dp_ldac_source_current_eqmid(void);
 
 a2dp_ldac_bitrate_mode_t a2dp_ldac_source_current_bitrate_mode(void);
+
+// True while the encoder is paused (AVDTP-suspended) waiting for audio
+// to resume. GUI uses this to display "Idle" instead of streaming
+// numbers when no audio is flowing.
+bool a2dp_ldac_source_is_idle_paused(void);
 
 #ifdef __cplusplus
 }

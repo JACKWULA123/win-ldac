@@ -10,6 +10,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -55,18 +56,35 @@ static void status_timer_handler(btstack_timer_source_t* ts) {
 }
 
 int main(int argc, char** argv) {
-    (void)argc; (void)argv;
     setvbuf(stdout, NULL, _IONBF, 0);
     SetConsoleOutputCP(CP_UTF8);
 
+    engine_bitrate_mode_t mode = ENGINE_BITRATE_FIXED_HQ;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--adaptive") == 0) {
+            mode = ENGINE_BITRATE_ADAPTIVE;
+        } else if (strcmp(argv[i], "--fixed") == 0) {
+            mode = ENGINE_BITRATE_FIXED_HQ;
+        } else {
+            fprintf(stderr,
+                "usage: %s [--fixed | --adaptive]\n"
+                "  --fixed    EQMID locked at HQ (990 kbps). [default]\n"
+                "  --adaptive ldac_ABR drives EQMID based on TX queue depth.\n",
+                argv[0]);
+            return 2;
+        }
+    }
+
     printf("engine_persistent_test - M7 phase A acceptance\n");
     printf("===============================================\n");
-    printf("Target: %s\n\n", TARGET_DEVICE_ADDR);
+    printf("Target: %s\n", TARGET_DEVICE_ADDR);
+    printf("Bitrate mode: %s\n\n",
+           mode == ENGINE_BITRATE_ADAPTIVE ? "Adaptive (ABR)" : "Fixed HQ");
 
     engine_config_t cfg;
     cfg.local_name             = LOCAL_NAME;
     cfg.reconnect_interval_ms  = 5000;
-    cfg.initial_bitrate_mode   = ENGINE_BITRATE_FIXED_HQ;
+    cfg.initial_bitrate_mode   = mode;
     sscanf_bd_addr(TARGET_DEVICE_ADDR, cfg.target_addr);
 
     if (engine_init(&cfg) != 0) {

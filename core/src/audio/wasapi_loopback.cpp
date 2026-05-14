@@ -172,6 +172,12 @@ bool detect_format(WAVEFORMATEX* wf, bool* is_float, bool* is_s16) {
 // internal mix format is always float32, so GetMixFormat doesn't tell
 // us this; we have to ask the endpoint directly.
 //
+// 24-bit settings come through as WAVE_FORMAT_EXTENSIBLE with
+// wBitsPerSample=32 (the container size) and wValidBitsPerSample=24
+// (the actual precision the user sees in the UI). Plain 16-bit comes
+// through as WAVE_FORMAT_PCM with wBitsPerSample=16. Read the right
+// field for each case so the GUI shows 16/24/32 matching the dropdown.
+//
 // Returns 16/24/32 on success, 0 on failure.
 int read_endpoint_bit_depth(IMMDevice* device) {
     if (!device) return 0;
@@ -182,10 +188,21 @@ int read_endpoint_bit_depth(IMMDevice* device) {
     PROPVARIANT pv;
     PropVariantInit(&pv);
     hr = props->GetValue(PKEY_AudioEngine_DeviceFormat, &pv);
-    if (SUCCEEDED(hr) && pv.vt == VT_BLOB && pv.blob.cbSize >= sizeof(WAVEFORMATEX)) {
+    if (SUCCEEDED(hr) && pv.vt == VT_BLOB &&
+        pv.blob.cbSize >= sizeof(WAVEFORMATEX)) {
         const WAVEFORMATEX* wf =
             reinterpret_cast<const WAVEFORMATEX*>(pv.blob.pBlobData);
-        result = static_cast<int>(wf->wBitsPerSample);
+        if (wf->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+            pv.blob.cbSize >= sizeof(WAVEFORMATEXTENSIBLE)) {
+            const WAVEFORMATEXTENSIBLE* ext =
+                reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(pv.blob.pBlobData);
+            // Use valid bits when set; otherwise container size.
+            result = ext->Samples.wValidBitsPerSample
+                     ? static_cast<int>(ext->Samples.wValidBitsPerSample)
+                     : static_cast<int>(wf->wBitsPerSample);
+        } else {
+            result = static_cast<int>(wf->wBitsPerSample);
+        }
     }
     PropVariantClear(&pv);
     props->Release();

@@ -348,10 +348,15 @@ static void a2dp_source_handler(uint8_t pt, uint16_t ch,
     }
 
     case A2DP_SUBEVENT_STREAM_STARTED:
-        a2dp_ldac_source_start();
-        link.streaming_started = true;
-        printf("[OK] Streaming. Play audio on Windows; XM5 will hear it.\n"
-               "    Power XM5 off / on to test reconnect.\n");
+        if (!link.streaming_started) {
+            a2dp_ldac_source_start();
+            link.streaming_started = true;
+            printf("[OK] Streaming. Play audio on Windows; XM5 will hear it.\n"
+                   "    Power XM5 off / on to test reconnect.\n");
+        } else {
+            a2dp_ldac_source_on_avdtp_started();
+            printf("[..] Streaming resumed (audio returned)\n");
+        }
         break;
 
     case A2DP_SUBEVENT_STREAMING_CAN_SEND_MEDIA_PACKET_NOW:
@@ -359,13 +364,12 @@ static void a2dp_source_handler(uint8_t pt, uint16_t ch,
         break;
 
     case A2DP_SUBEVENT_STREAM_SUSPENDED:
-        // Remote paused (could happen if XM5's local controls take over).
-        // Leave the link state in place — if XM5 disconnects we'll see
-        // SIGNALING_CONNECTION_RELEASED; if XM5 resumes we'll see
-        // STREAM_STARTED again. Just stop encoding for now.
-        printf("[..] Stream suspended\n");
-        a2dp_ldac_source_stop();
-        link.streaming_started = false;
+        // AVDTP-suspended due to silence; the audio timer keeps running
+        // so the silence watcher can resume the stream when audio
+        // returns. Don't clear streaming_started — STREAM_STARTED on
+        // resume will use it to take the "resumed" path.
+        printf("[..] Stream suspended (idle)\n");
+        a2dp_ldac_source_on_avdtp_suspended();
         break;
 
     case A2DP_SUBEVENT_STREAM_RELEASED:

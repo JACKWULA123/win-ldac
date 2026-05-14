@@ -394,21 +394,63 @@ static void attempt_connect_fn(void) {
     }
 }
 
-static void wasapi_invalidated_cb(void) {
-    // Capture-thread context. Just log; the engine's audio timer noticing
-    // ring underrun + a follow-up reconnect would also work, but the
-    // cleanest recovery is to drop the link and let the reconnect
-    // supervisor rebuild. We push that onto the BT thread.
-    log_line("[engine] WASAPI device invalidated — dropping link to "
-             "rebuild at new format");
-    // The cleanest cross-thread bounce here would dispatch a re-init via
-    // btstack_run_loop_execute_on_main_thread. For M7 v1 we just nudge
-    // the supervisor by triggering a disconnect from this thread;
-    // a2dp_source_disconnect is reentrant w.r.t. the BT thread because
-    // BTstack's per-command queue serialises it.
+// Triggered on the WASAPI capture thread when Windows reports the audio
+// endpoint format has changed (user altered Sound Properties, default
+// device switched, etc.). We can't safely call BTstack from here, so we
+// post a callback to the BT thread; the actual rebuild happens there
+// where it's free to join the now-exiting capture thread.
+static btstack_context_callback_registration_t wasapi_invalidated_cb_reg;
+static volatile LONG wasapi_invalidated_pending;
+
+static void on_bt_thread_rebuild_wasapi(void* arg) {
+    (void)arg;
+    InterlockedExchange(&wasapi_invalidated_pending, 0);
+    log_line("[engine] rebuilding WASAPI after device-format change");
+
+    // The capture thread has already exited (the invalidated branch in
+    // wasapi_loopback's loop falls into thread_exit). Stop joins it and
+    // tears down the COM interfaces.
+    wasapi_loopback_stop();
+
+    int new_sr = 0, new_ch = 0;
+    int rc = wasapi_loopback_init(&new_sr, &new_ch);
+    if (rc != 0) {
+        log_line("[engine] WASAPI re-init failed rc=%d — giving up", rc);
+        return;
+    }
+    e.wasapi_sample_rate = new_sr;
+    e.wasapi_channels    = new_ch;
+    log_line("[engine] WASAPI rebuilt: %d Hz / %d-bit",
+             new_sr, wasapi_loopback_device_bit_depth());
+    wasapi_loopback_set_invalidated_callback(&wasapi_invalidated_cb);
+    if (wasapi_loopback_start() != 0) {
+        log_line("[engine] wasapi_loopback_start failed");
+        return;
+    }
+
+    // Cached LDAC negotiation parameters refer to the OLD WASAPI rate.
+    // Clear them so the next OTHER_CAPABILITY exchange re-derives the
+    // sample rate from the fresh WASAPI value.
+    e.negotiated_sr_hz  = 0;
+    e.negotiated_cm_bit = 0;
+
+    // Force a reconnect so SET_CONFIGURATION goes out with the new
+    // sample rate. The supervisor handles the rest.
     if (e.a2dp_cid) {
         a2dp_source_disconnect(e.a2dp_cid);
+    } else {
+        reconnect_supervisor_note_disconnected();
     }
+}
+
+static void wasapi_invalidated_cb(void) {
+    // Coalesce repeat fires: WASAPI can deliver multiple invalidations
+    // back-to-back if the device transitions through intermediate
+    // states. We only need one rebuild.
+    if (InterlockedExchange(&wasapi_invalidated_pending, 1) != 0) return;
+    wasapi_invalidated_cb_reg.callback = &on_bt_thread_rebuild_wasapi;
+    wasapi_invalidated_cb_reg.context  = NULL;
+    btstack_run_loop_execute_on_main_thread(&wasapi_invalidated_cb_reg);
 }
 
 // ── Event handlers ─────────────────────────────────────────────────────
@@ -582,10 +624,19 @@ static void a2dp_source_handler(uint8_t pt, uint16_t ch,
     }
 
     case A2DP_SUBEVENT_STREAM_STARTED:
-        a2dp_ldac_source_start();
-        e.streaming_started = true;
+        if (!e.streaming_started) {
+            // First STREAM_STARTED after STREAM_ESTABLISHED — start the
+            // audio timer.
+            a2dp_ldac_source_start();
+            e.streaming_started = true;
+            log_line("[engine] streaming");
+        } else {
+            // Resume after a silence-driven AVDTP SUSPEND. Audio timer
+            // is already running.
+            a2dp_ldac_source_on_avdtp_started();
+            log_line("[engine] streaming (resumed)");
+        }
         snapshot_set_state(ENGINE_STATE_STREAMING);
-        log_line("[engine] streaming");
         break;
 
     case A2DP_SUBEVENT_STREAMING_CAN_SEND_MEDIA_PACKET_NOW:
@@ -593,10 +644,13 @@ static void a2dp_source_handler(uint8_t pt, uint16_t ch,
         break;
 
     case A2DP_SUBEVENT_STREAM_SUSPENDED:
-        log_line("[engine] stream suspended");
-        a2dp_ldac_source_stop();
-        e.streaming_started = false;
-        snapshot_set_state(ENGINE_STATE_NEGOTIATING);
+        // AVDTP SUSPEND — either we asked for it (silence detector) or
+        // the remote did. Keep the audio timer running so the silence
+        // watcher can resume the stream when audio reappears.
+        log_line("[engine] stream suspended (idle)");
+        a2dp_ldac_source_on_avdtp_suspended();
+        // Stay in STREAMING state from the engine's POV; the link is
+        // up, we're just temporarily not pushing data.
         break;
 
     case A2DP_SUBEVENT_STREAM_RELEASED:

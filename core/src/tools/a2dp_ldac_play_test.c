@@ -135,8 +135,10 @@ static void duration_handler(btstack_timer_source_t* ts) {
     printf("\n[ PASS ]  M5 test duration elapsed.\n");
     printf("          Underrun samples: %" PRIu64 "\n",
            a2dp_ldac_source_underrun_samples());
-    printf("          Current LDAC bitrate: %d kbps\n",
-           a2dp_ldac_source_current_bitrate_kbps());
+    printf("          Nominal LDAC bitrate: %d kbps\n",
+           a2dp_ldac_source_nominal_kbps());
+    printf("          Effective bitrate:    %d kbps\n",
+           a2dp_ldac_source_effective_kbps());
     shutdown_with_status(0);
 }
 
@@ -329,8 +331,8 @@ static void a2dp_source_handler(uint8_t pt, uint16_t ch,
             app.a2dp_cid, app.local_seid,
             app.negotiated_sr_hz,
             app.negotiated_cm_bit,
-            /*eqmid=*/0,  // 0 = HQ (LDACBT_EQMID_HQ)
-            wasapi_loopback_read);
+            A2DP_LDAC_BITRATE_FIXED_HQ,
+            wasapi_loopback_read_f32);
         if (rc != 0) {
             fprintf(stderr, "[ERR] a2dp_ldac_source_setup failed\n");
             shutdown_with_status(12);

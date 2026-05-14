@@ -49,6 +49,22 @@
 #define ABR_PROC_INTERVAL_MS        100   // how often we call ldac_ABR_Proc
 #define EFFECTIVE_KBPS_WINDOW_MS    1000  // sliding window for the GUI number
 
+// Silence detection. WASAPI loopback writes literal zeros into the ring
+// whenever the audio engine has nothing to deliver (AUDCLNT_BUFFERFLAGS_SILENT).
+// After SILENCE_TIMEOUT_MS of nothing-but-zero PCM chunks we ask BTstack
+// to AVDTP-SUSPEND the stream so XM5 can drop into low-power mode rather
+// than decoding silence at 990 kbps. Resume on the first non-zero sample.
+#define SILENCE_TIMEOUT_MS          2000
+
+// Stream state machine: silence-detection driven AVDTP SUSPEND/START
+// round trips, on top of the basic "is the audio timer running?" idea.
+typedef enum {
+    SRC_STREAM_ACTIVE = 0,   // encoder running, sending packets
+    SRC_STREAM_PAUSING,      // called a2dp_source_pause_stream, awaiting STREAM_SUSPENDED
+    SRC_STREAM_PAUSED,       // AVDTP suspended; ring drained but nothing sent
+    SRC_STREAM_RESUMING,     // called a2dp_source_start_stream, awaiting STREAM_STARTED
+} src_stream_state_t;
+
 // ── Module state ───────────────────────────────────────────────────────
 typedef struct {
     bool                  initialised;
@@ -61,6 +77,11 @@ typedef struct {
     a2dp_ldac_bitrate_mode_t bitrate_mode;
     ldac_wrapper_t*       enc;
     a2dp_ldac_source_pull_pcm_fn pull_pcm;
+
+    // Silence-pause / AVDTP suspend state machine.
+    src_stream_state_t    stream_state;
+    int                   silent_chunks;            // consecutive all-zero PCM chunks
+    int                   silence_threshold_chunks; // computed from sample rate
 
     // Audio-time accounting (elapsed-time → samples-still-to-encode).
     uint32_t              time_last_tick_ms;
@@ -181,6 +202,13 @@ int a2dp_ldac_source_setup(uint16_t a2dp_cid,
     s.bitrate_mode           = mode;
     s.enc                    = enc;
     s.pull_pcm               = pull_pcm;
+    s.stream_state           = SRC_STREAM_ACTIVE;
+    // Convert SILENCE_TIMEOUT_MS into a count of LDAC-input-sized chunks.
+    // Each pump iteration consumes LDAC_PCM_FRAMES_PER_CALL (128) frames
+    // → silence_threshold_chunks * 128 / sample_rate seconds of silence.
+    s.silence_threshold_chunks =
+        (SILENCE_TIMEOUT_MS * sample_rate_hz) /
+        (1000 * LDAC_PCM_FRAMES_PER_CALL);
 
     if (mode == A2DP_LDAC_BITRATE_ADAPTIVE) {
         if (ldac_wrapper_abr_enable(s.enc, ABR_PROC_INTERVAL_MS) != 0) {
@@ -195,6 +223,8 @@ int a2dp_ldac_source_setup(uint16_t a2dp_cid,
 void a2dp_ldac_source_start(void) {
     if (!s.initialised) return;
     s.streaming         = true;
+    s.stream_state      = SRC_STREAM_ACTIVE;
+    s.silent_chunks     = 0;
     s.time_last_tick_ms = 0;
     s.samples_owed      = 0;
     s.acc_missed_ppm    = 0;
@@ -217,6 +247,33 @@ void a2dp_ldac_source_start(void) {
     btstack_run_loop_set_timer_handler(&s.abr_timer, &abr_timer_handler);
     btstack_run_loop_set_timer(&s.abr_timer, ABR_PROC_INTERVAL_MS);
     btstack_run_loop_add_timer(&s.abr_timer);
+}
+
+void a2dp_ldac_source_on_avdtp_suspended(void) {
+    if (!s.initialised) return;
+    // AVDTP SUSPEND has taken effect on the sink. Promote our state
+    // machine accordingly. If we got here without going through PAUSING
+    // (e.g. remote-initiated suspend), still treat it as paused — we'll
+    // resume on the next non-silent chunk.
+    s.stream_state = SRC_STREAM_PAUSED;
+    // Drop any half-built packet; we don't get a CAN_SEND_NOW in paused
+    // mode and BTstack would refuse the request anyway.
+    s.packet_byte_count = 0;
+    s.packet_frame_count = 0;
+    s.packet_pending = false;
+}
+
+void a2dp_ldac_source_on_avdtp_started(void) {
+    if (!s.initialised) return;
+    s.stream_state = SRC_STREAM_ACTIVE;
+    s.silent_chunks = 0;
+}
+
+bool a2dp_ldac_source_is_idle_paused(void) {
+    return s.initialised &&
+           (s.stream_state == SRC_STREAM_PAUSING ||
+            s.stream_state == SRC_STREAM_PAUSED ||
+            s.stream_state == SRC_STREAM_RESUMING);
 }
 
 void a2dp_ldac_source_stop(void) {
@@ -344,11 +401,31 @@ static void send_current_packet(void) {
     s.packet_pending    = false;
 }
 
+// Cheap all-zero check. WASAPI's silent-flag path writes literal 0.0f
+// into the ring, so true silence is a deterministic "every sample == 0"
+// case. Real music almost always has dither / DC offset that pushes at
+// least one sample off zero, so we won't mistake quiet passages for
+// silence.
+static bool is_silent_chunk(const float* pcm, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        if (pcm[i] != 0.0f) return false;
+    }
+    return true;
+}
+
 // Encode + accumulate until the build buffer contains at least one
 // transport frame, then request CAN_SEND. Returns silently if there's
 // not enough buffered PCM or a request is already in flight.
+//
+// Also runs the silence detector. While the AVDTP stream is suspended
+// (silence-driven) we keep draining PCM and counting silence, but skip
+// the encode/send work entirely — that's the whole point of the
+// suspend: spare both ends from 990 kbps of zeros.
 static void pump_until_packet_ready(void) {
-    if (!s.streaming || s.packet_pending) return;
+    if (!s.streaming) return;
+
+    bool send_inhibited =
+        (s.stream_state != SRC_STREAM_ACTIVE) || s.packet_pending;
 
     while (s.samples_owed >= (uint32_t)LDAC_PCM_FRAMES_PER_CALL) {
         // Pull exactly one libldac chunk's worth of interleaved float PCM.
@@ -357,7 +434,49 @@ static void pump_until_packet_ready(void) {
         size_t got       = s.pull_pcm(pcm, requested);
         if (got < requested) {
             memset(pcm + got, 0, (requested - got) * sizeof(float));
-            s.underrun_samples += (requested - got);
+            // Don't count underrun while AVDTP-suspended — the WASAPI
+            // ring naturally runs empty when nothing is playing on
+            // Windows, and that's literally what suspend is for.
+            if (s.stream_state == SRC_STREAM_ACTIVE) {
+                s.underrun_samples += (requested - got);
+            }
+        }
+
+        bool chunk_is_silent = is_silent_chunk(pcm, requested);
+        if (chunk_is_silent) {
+            s.silent_chunks++;
+        } else {
+            s.silent_chunks = 0;
+            // Audio is back — ask BTstack to resume the stream if we're
+            // currently AVDTP-paused. Encoding/sending stays off until
+            // STREAM_STARTED comes back (~50-200 ms typical).
+            if (s.stream_state == SRC_STREAM_PAUSED) {
+                printf("[a2dp_ldac_source] non-silent PCM detected — "
+                       "resuming AVDTP stream\n");
+                s.stream_state = SRC_STREAM_RESUMING;
+                a2dp_source_start_stream(s.a2dp_cid, s.local_seid);
+            }
+        }
+
+        s.samples_owed -= LDAC_PCM_FRAMES_PER_CALL;
+
+        if (send_inhibited) {
+            // Suspended (or about to be). Drain the rest of samples_owed
+            // without touching the encoder. We still continue iterating
+            // so silence counting + resume detection stay accurate.
+            continue;
+        }
+
+        // Auto-suspend on prolonged silence. Issue this BEFORE encoding
+        // so we don't push one more silent packet than we have to.
+        if (s.stream_state == SRC_STREAM_ACTIVE &&
+            s.silent_chunks >= s.silence_threshold_chunks) {
+            printf("[a2dp_ldac_source] %d ms silence — suspending AVDTP\n",
+                   SILENCE_TIMEOUT_MS);
+            s.stream_state = SRC_STREAM_PAUSING;
+            a2dp_source_pause_stream(s.a2dp_cid, s.local_seid);
+            send_inhibited = true;
+            continue;
         }
 
         // Encode straight into the body of the build buffer, after the
@@ -381,7 +500,6 @@ static void pump_until_packet_ready(void) {
             a2dp_ldac_source_stop();
             return;
         }
-        s.samples_owed -= LDAC_PCM_FRAMES_PER_CALL;
 
         if (out_bytes == 0) {
             // libldac is still buffering input (happens at 88.2/96 kHz
@@ -392,8 +510,8 @@ static void pump_until_packet_ready(void) {
         s.packet_byte_count  += (int)out_bytes;
         s.packet_frame_count += frame_num;
 
-        // M5 keeps it at exactly one frame per AVDTP packet (see file
-        // header). As soon as we have a frame, request a send.
+        // One frame per AVDTP packet. As soon as we have a frame,
+        // request a send and bail until CAN_SEND_NOW arrives.
         s.packet_pending = true;
         s.outstanding_packets++;
         a2dp_source_stream_endpoint_request_can_send_now(
