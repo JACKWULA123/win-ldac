@@ -28,9 +28,16 @@ vendor/btstack/
 third_party/imgui/
 third_party/implot/
 
-# User-supplied UI assets (font + watermark image). See assets/README.md.
+# Bundled UI assets are now committed (Maple Mono under SIL OFL 1.1,
+# monkey + pic both open-source per the project owner). Anything other
+# than the curated set below stays out of source control.
 assets/*
 !assets/README.md
+!assets/OFL.txt
+!assets/MapleMono-Regular.ttf
+!assets/monkey.png
+!assets/pic.png
+!assets/win-ldac.ico
 
 # Local test artifacts
 out.ldac

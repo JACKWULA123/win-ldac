@@ -3,8 +3,8 @@
 最近更新：2026-05-14
 
 ## 当前里程碑
-**M7 Phase B 完成 ✅** — Dear ImGui + DirectX 11 GUI 上线
-**下一步**：M8 — 配对流程 + 配置持久化（解锁分发场景）
+**M9 完成 ✅** — 系统托盘 + 关窗隐藏 + 开机自启 + 任务栏图标
+**下一步**：M10 — README + 一键 build 脚本（朋友能照着在干净 Windows 上 build）
 
 ## 已完成的里程碑
 
@@ -13,99 +13,100 @@
 | **M1** | libldac 通编（990 kbps HQ 合成测试） |
 | **M2** | BTstack HCI + Realtek RTL8761BU 固件加载 |
 | **M3.1** | A2DP source SBC + 正弦波 → XM5 |
-| **M3.2** | WASAPI loopback → SBC → XM5（系统音频流） |
+| **M3.2** | WASAPI loopback → SBC → XM5 |
 | **M4** | LDAC capability 协商（Sony vendor 0x12D codec 0x00AA） |
 | **M5** | LDAC 真实出声（HQ 48k 990 kbps，链式 CAN_SEND_NOW） |
 | **M6.1** | 链路密钥持久化（重启免重新配对） |
-| **M6.2** | 断连自动重连（XM5 关机/超距 → 5s 重试） |
-| **M7 Phase A** | F32 PCM 端到端、ABR、Effective kbps 测量、引擎库、静音自动挂起、Windows 格式变更动态重建 |
-| **M7 Phase B** | Dear ImGui + DX11 GUI（设备卡片、ImPlot 60s 曲线、Mode 分段控件、How2Use 弹窗） |
+| **M6.2** | 断连自动重连 |
+| **M7 Phase A** | F32 PCM 端到端、ABR、引擎库、静音自动挂起、Windows 格式变更动态重建 |
+| **M7 Phase B** | Dear ImGui + DX11 GUI（设备卡片、ImPlot 60s 曲线、Mode 分段控件） |
+| **M8** | 配对流程 + 配置文件持久化（解锁分发） |
+| **M9** | 系统托盘 + 开机自启 + 任务栏图标 + 不支持率友好弹窗 |
 
-## M7 Phase B 已完成（本会话）
+## M8 完成内容（本会话）
 
-提交：本会话末统一 commit。
+### 引擎侧 (`core/src/engine/engine.{c,h}`)
+- `engine_status_t.has_target` / `wasapi_unsupported_rate_hz` 字段
+- 新增 scan API：`engine_get_scan_state`、`engine_post_start_scan` / `_stop_scan` / `_clear_scan_results`
+- `engine_post_clear_target()`、`engine_post_set_target(zero)` 等价于清除
+- HCI 事件处理新增 `GAP_EVENT_INQUIRY_RESULT` / `_COMPLETE` / `HCI_EVENT_REMOTE_NAME_REQUEST_COMPLETE`
+- `engine_init` 在未配对时跳过 supervisor 启动；在 `HCI_STATE_WORKING` 时按需启动
+- 不支持率（≠ 44.1/48/88.2/96 kHz）检测：init 和 runtime rebuild 两条路径均上报 `wasapi_unsupported_rate_hz`
 
-### 引擎侧补充
-- **`engine_status_t.idle_paused`**：暴露 a2dp_ldac_source idle-paused 状态给 GUI
-- **`engine_post_disconnect()`**：跨线程主动断链 + 触发 supervisor 重连，给 GUI 的 "Connection Refresh" 按钮用
-- **`btstack_run_loop_trigger_exit()` 替换 `exit(0)/exit(3)`**：让 `engine_run()` 干净返回，`engine_shutdown()` 能正常执行，进程不再硬切
+### 配置文件 (`core/src/app/config_file.{c,h}`)
+- 简单 `key=value` 文本格式，路径 `<exe_dir>\win-ldac-config.cfg`
+- 字段：`target_addr` / `target_name` / `bitrate_mode`
+- 原子写入 `.tmp` + `MoveFileEx`，未知 key 忽略
 
-### GUI 模块（`gui/`）
-- **CMake**：把 imgui (core + DX11 + Win32 backends) 和 implot 编成静态库，链进 `win-ldac.exe`；如果 `third_party/imgui` 或 `implot` 不在则 GUI target 安静地 skip，CLI 工具仍能构建
-- **WinMain**：固定 500×360 client，`WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX`（去掉缩放和最大化）；DX11 设备 + 消息泵
-- **引擎线程**：`std::thread` 跑 `engine_init/run/shutdown`，与 GUI 主线程通过 `engine_get_status_snapshot()` (CRITICAL_SECTION 加锁) 和 `engine_post_*` 命令交互
-- **字体**：ImGui 1.92 的 dynamic font sizing，单 TTF 文件渲染任意像素尺寸；Maple Mono 用户自放在 `assets/`，否则回退 ProggyClean
-- **图片**：WIC 加载 PNG → DX11 ShaderResourceView → ImDrawList::AddImage 渲染；猴子水印 480×167 PNG，alpha 50/255，CSS object-fit: cover 算法填满图表卡片
+### GUI
+- 启动读 config → 把 target 喂给 engine；callbacks (`on_pair` / `on_unpair` / `on_bitrate_persist`) 把改动落盘
+- 设备卡片首行显示 `ui.target_name` 或 "Not paired" / "Paired device" fallback
+- 配对 modal：`Scan now` + 设备列表 (Selectable) + `Show non-audio devices` 过滤 + `Unpair current` / `Cancel` / `Pair`
+- 不支持率弹窗：`draw_unsupported_rate_popup` 检测到非零率自动弹出，含 mmsys.cpl 操作步骤说明
+- Settings 按钮改名 `Pair new device`
 
-### UI 布局（500×360 客户区）
-- **设备卡片** (56h)：左 "WH-1000XM5 ● Connected" + BD_ADDR；右大字 "988 kbps" + 小字 "LDAC HQ 96000 Hz 24-bit"，用 ImGui Table 55:45 分栏 + `right_aligned_text` 帮助函数
-- **图表卡片** (196h)：透明 ImPlot frame + 猴子背景；曲线蓝色 1.8 粗，参考线 330/660/990 虚淡
-- **Mode 行** (30h)：自写 `segmented_button` 实现分段开关（选中蓝填充、未选中浅灰），右侧 `How2Use?` 次级白按钮
-- **底部按钮行** (26h)：`Connection Refresh`（蓝主按钮）/ `Settings?`（禁用占位）/ `Quit`
-- **How2Use 弹窗**：`BeginPopupModal` 420×240 居中弹出，正文目前是占位
+## M9 完成内容（本会话）
 
-### 资源管理
-- **`.gitignore`** 新增 `third_party/imgui`、`third_party/implot`、`assets/*`（除 README）
-- **`assets/README.md`**：说明从哪下载 Maple Mono、放在哪、worktree 怎么建 junction
-- **`third_party/README.md`**：说明 clone imgui/implot 的命令
+### 系统托盘 (`gui/src/main.cpp`)
+- `Shell_NotifyIconW(NIM_ADD)` 在窗口创建后安装
+- 自定义消息 `WM_TRAY_CALLBACK = WM_APP + 1`
+- 左键单击/双击 → `ShowWindow(SW_SHOW)` + `SetForegroundWindow`
+- 右键弹出 `TrackPopupMenu`：Open / Start with Windows ✓ / Quit
+- Tooltip 每帧从 `engine_status_t` 构建，`NIM_MODIFY` 内部 debounce 仅在文本变化时实际写
 
-硬件实测：所有功能正常（连接、流式、Adaptive 切换、Connection Refresh、Quit 干净退出）。
+### 关窗行为
+- `WM_CLOSE` 改成 `ShowWindow(SW_HIDE)` —— X 按钮不再退出，引擎继续在后台跑
+- 退出走 `g_quit_requested`（托盘 Quit 菜单 / GUI Quit 按钮设置）→ 主循环 `DestroyWindow` → `WM_DESTROY` 里 `tray_remove` + `PostQuitMessage`
 
-## 下一步：M8 — 配对流程 + 配置持久化
+### 隐藏时的 CPU 节省
+- `IsWindowVisible(hwnd)` 为 false 时跳过 ImGui frame loop + `Sleep(50)`
+- 引擎线程继续跑、音频继续流；仅 GUI 不渲染
 
-### 目标
-解锁"分享给朋友"的场景。当前 GUI 把 XM5 BD_ADDR 硬编码在 `gui/src/main.cpp` 的 `TARGET_DEVICE_ADDR`，朋友想用必须改源码重编。M8 让程序在首次运行时扫描周边蓝牙设备、用户选一台后把 BD_ADDR 存到 JSON 配置文件，之后启动自动读取。
+### 开机自启
+- 注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\win-ldac` = 加引号的 exe 完整路径
+- 托盘菜单 `Start with Windows` 项 toggle，读 / 写 / 删通过 `RegOpenKeyExW` + `RegSetValueExW` / `RegDeleteValueW`
+
+### 任务栏 / 标题栏 / 托盘图标
+- `assets/pic.png` (1010×1010) → Pillow Lanczos 降到 256×256 → `win-ldac.ico` 多尺寸 (16/24/32/48/64/128/256)
+- `gui/win-ldac.rc.in` + `configure_file` 把绝对路径 token 替换 → `IDI_TRAY_ICON ICON` 资源嵌入 exe
+- `resources.h` 定义 `IDI_TRAY_ICON = 101`
+- `WNDCLASSEX.hIcon` / `hIconSm` 用 `LoadIconW(hInst, MAKEINTRESOURCEW(IDI_TRAY_ICON))` → 标题栏 / Alt-Tab / 任务栏 / 托盘四处统一
+- 找不到资源 → fallback 到 `IDI_APPLICATION`，dev 编译不会因缺图崩
+
+### 资源 bundling
+- `MapleMono-Regular.ttf` (SIL OFL 1.1)、`monkey.png`、`pic.png`、`win-ldac.ico`、`OFL.txt`、`assets/README.md` 全部 commit
+- `.gitignore` 改成 allowlist：`assets/*` 默认忽略，白名单上述文件
+
+## 下一步：M10
 
 ### 任务列表
+1. 顶层 `README.md`（中文优先 + 英文 build steps）
+2. `build.ps1` 一键脚本（cmake configure + build）
+3. CI / hardware 文档：哪些 dongle 已验证、Zadig 步骤、Memory Integrity 关闭说明
+4. HANDOFF.md §6 同步更新最新 build 命令
 
-1. **HCI Inquiry 扫描 API**（引擎侧）
-   - `engine_post_start_scan(duration_s)` / `engine_post_stop_scan()`
-   - 扫描事件回调（`HCI_EVENT_INQUIRY_RESULT_*`、`HCI_EVENT_REMOTE_NAME_REQUEST_COMPLETE`）通过事件队列暴露给 GUI
-   - 设备列表数据结构：`{bd_addr, name, rssi, cod, last_seen_ms}`，去重 + RSSI 衰减
+### 不做的
+- 不打包预编译二进制（HANDOFF §9 license 约定）
+- 不写自动 CI（朋友自编场景不需要）
 
-2. **配置文件**（引擎侧）
-   - `app/config_file.{c,h}`：读写 `config.json`（用 nlohmann/json 或更简单的手写 parser，避免引入新依赖）
-   - 字段：`target_addr`、`target_name`、`bitrate_mode`、`local_name`、`reconnect_interval_ms`
-   - 路径：`%APPDATA%\win-ldac\config.json`（或 exe 同目录，需决定）
-   - 启动时读取，无配置则进入"未配对"状态（不启动 supervisor）
-
-3. **GUI 配对面板**
-   - 未配置 target 时：主界面变成 "Click Settings to pair a device"
-   - `Settings?` 按钮（目前禁用）点开 → 弹出 modal：
-     - 左侧设备列表（live update，扫描中带 spinner）
-     - 右侧选中设备详情 + "Pair" 按钮
-     - 默认只显示 CoD 包含 Audio Major Service Class 的设备；隐藏开关 "Show all devices"
-   - Pair 流程：写配置 → `engine_post_set_target` → 关弹窗
-
-4. **handoff 整理**
-   - 写 `assets/.gitkeep` 或类似让目录存在
-   - 更新 HANDOFF.md §7 加 M8 任务
-
-### 关键参考
-- BTstack `port/windows-winusb/main.c` 的 `start_scan()` / `stop_scan()` 实现可以抄
-- HCI Inquiry 的 RSSI/EIR 模式已在 `engine_init()` 里设置 (`hci_set_inquiry_mode(INQUIRY_MODE_RSSI_AND_EIR)`)
-- Sony XM 系列的 Major Service Class = 0x200000（Audio）
-
-## 已知问题 / 未来工作
-
-- **ABR 阈值未调优**：libldac ABR 用默认 thresholds，可能对我们的 outstanding_packets 代理值不敏感
-- **AVDTP RECONFIGURE 未使用**：Windows 改采样率走"完全断开 + 重连"路径（~5s 中断）
-- **静音挂起的幅度阈值**：当前 `== 0.0f` 严格判定，对持续接近静音但非零的音频不触发
-- **GUI 教程文案**：`gui/src/ui/status_window.cpp::draw_how2use_popup` 中 `(Tutorial content to be written.)` 待用户填充
-- **系统托盘 / 开机自启**：M9 实现
+## 已知问题
+- ABR 阈值未调优
+- AVDTP RECONFIGURE 未使用（Windows 改采样率走 disconnect+reconnect 路径，~5s 中断）
+- 静音挂起的幅度阈值（`== 0.0f` 严格判定，接近静音但非零的源不触发）
+- 不支持率（192k 等）从 192k 改回 48k 后**仍需手动重启 win-ldac**，没有自动恢复路径
 
 ## 仓库当前状态
 
 ```
-main 分支 commit chain:
-  255823e  M7 phase A handoff: STATUS.md for phase B
+main 分支：
+  d6441e6  M7 phase B: Dear ImGui + DirectX 11 GUI
+  255823e  M7 phase A handoff
   f790b33  M7 phase A polish
-  734ad5e  M7 phase A: float32, ABR, engine library
-  13a9f64  M6.2: auto-reconnect
+  734ad5e  M7 phase A
   ...
 
-当前 worktree (claude/naughty-johnson-262a49):
-  待 commit: M7 Phase B GUI 全部改动
+当前 worktree (claude/naughty-johnson-262a49)：
+  待 commit: M8 + M9 + 资源 bundling 全部
 ```
 
 ## Worktrees 维护
@@ -115,8 +116,11 @@ main 分支 commit chain:
 ```powershell
 cmd /c "mklink /J vendor\ldacBT D:\claude\ldac\vendor\ldacBT"
 cmd /c "mklink /J vendor\btstack D:\claude\ldac\vendor\btstack"
-cmd /c "mklink /J third_party D:\claude\ldac\third_party"
+cmd /c "mklink /J third_party\imgui  D:\claude\ldac\third_party\imgui"
+cmd /c "mklink /J third_party\implot D:\claude\ldac\third_party\implot"
 cmd /c "mklink /J assets D:\claude\ldac\assets"
 ```
 
-git 操作（commit/push/pull/log）时需要 rmdir 掉这四个 junction，git 完事再 mklink 回来。
+注意 `third_party/` 现在是真实目录（含 `README.md`），所以 `imgui` / `implot` 是 **子级** junction。`assets/` 仍然整目录 junction（因为我们的素材也存在主仓库的同一位置）。
+
+git 操作时需要 rmdir 掉这些 junction（vendor 整目录 + third_party 两子目录 + assets 整目录），git 完事再 mklink 回来。

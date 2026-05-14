@@ -96,6 +96,28 @@ typedef struct {
     engine_state_t           state;
     engine_log_fn            log_fn;
 
+    bool                     has_target;       // M8: false when unpaired
+    bool                     hci_working;      // HCI is in WORKING state
+    bool                     supervisor_started;
+
+    // Non-zero when the Windows mixer is at a rate LDAC can't accept;
+    // value is the offending rate in Hz. Reset to 0 when WASAPI re-init
+    // lands on a supported rate again.
+    int                      wasapi_unsupported_rate_hz;
+
+    // M8 scan state. `scan_pub` is the snapshot guarded by snapshot_lock,
+    // updated on the BT thread and copied verbatim to GUI requests.
+    // The page_scan/clock_offset/name_pending fields needed for remote
+    // name requests live in `scan_internal[]`, parallel-indexed to
+    // scan_pub.devices[].
+    engine_scan_state_t      scan_pub;
+    struct {
+        uint16_t page_scan_rep_mode;
+        uint16_t clock_offset;
+        bool     name_pending;       // remote-name request in flight
+    } scan_internal[ENGINE_SCAN_MAX];
+    bool                     inquiry_complete;   // GAP_EVENT_INQUIRY_COMPLETE seen
+
     // Cross-thread snapshot lock.
     CRITICAL_SECTION         snapshot_lock;
     bool                     snapshot_lock_inited;
@@ -118,10 +140,16 @@ static void log_line(const char* fmt, ...);
 static void snapshot_set_state(engine_state_t s);
 
 // ── Public API ─────────────────────────────────────────────────────────
+static bool addr_is_zero(const bd_addr_t a) {
+    for (int i = 0; i < 6; ++i) if (a[i]) return false;
+    return true;
+}
+
 int engine_init(const engine_config_t* cfg) {
     if (!cfg) return -1;
     memset(&e, 0, sizeof(e));
     memcpy(e.target, cfg->target_addr, sizeof(bd_addr_t));
+    e.has_target = !addr_is_zero(e.target);
     if (cfg->local_name) {
         btstack_strcpy(e.local_name, sizeof(e.local_name), cfg->local_name);
     } else {
@@ -148,7 +176,13 @@ int engine_init(const engine_config_t* cfg) {
              wasapi_loopback_device_bit_depth());
     if (e.wasapi_channels != 2 ||
         !a2dp_ldac_hz_to_sf_bit(e.wasapi_sample_rate)) {
-        log_line("[engine] mixer must be stereo @ 44.1/48/88.2/96 kHz");
+        log_line("[engine] mixer at %d Hz / %d ch — LDAC needs stereo @ "
+                 "44.1/48/88.2/96 kHz",
+                 e.wasapi_sample_rate, e.wasapi_channels);
+        EnterCriticalSection(&e.snapshot_lock);
+        e.state = ENGINE_STATE_STOPPING;
+        e.wasapi_unsupported_rate_hz = e.wasapi_sample_rate;
+        LeaveCriticalSection(&e.snapshot_lock);
         return -1;
     }
     wasapi_loopback_set_invalidated_callback(&wasapi_invalidated_cb);
@@ -226,8 +260,13 @@ int engine_init(const engine_config_t* cfg) {
     gap_set_class_of_device(CLASS_OF_DEVICE);
     gap_discoverable_control(1);
 
-    reconnect_supervisor_init(e.target, &attempt_connect_fn,
-                              e.reconnect_interval_ms);
+    if (e.has_target) {
+        reconnect_supervisor_init(e.target, &attempt_connect_fn,
+                                  e.reconnect_interval_ms);
+        log_line("[engine] target = %s", bd_addr_to_str(e.target));
+    } else {
+        log_line("[engine] no target configured — awaiting pairing");
+    }
 
     snapshot_set_state(ENGINE_STATE_HCI_INIT);
     return 0;
@@ -264,6 +303,7 @@ void engine_get_status_snapshot(engine_status_t* out) {
     if (!out) return;
     EnterCriticalSection(&e.snapshot_lock);
     memcpy(out->target_addr, e.target, sizeof(bd_addr_t));
+    out->has_target         = e.has_target;
     out->state              = e.state;
     out->link_up            = e.link_up;
     out->sample_rate_hz     = a2dp_ldac_source_negotiated_sample_rate();
@@ -275,6 +315,14 @@ void engine_get_status_snapshot(engine_status_t* out) {
     out->underrun_samples   = a2dp_ldac_source_underrun_samples();
     out->reconnect_attempts = reconnect_supervisor_attempt_count();
     out->idle_paused        = a2dp_ldac_source_is_idle_paused();
+    out->wasapi_unsupported_rate_hz = e.wasapi_unsupported_rate_hz;
+    LeaveCriticalSection(&e.snapshot_lock);
+}
+
+void engine_get_scan_state(engine_scan_state_t* out) {
+    if (!out) return;
+    EnterCriticalSection(&e.snapshot_lock);
+    memcpy(out, &e.scan_pub, sizeof(*out));
     LeaveCriticalSection(&e.snapshot_lock);
 }
 
@@ -318,14 +366,40 @@ static set_target_msg_t set_target_msg_storage;
 
 static void on_bt_thread_set_target(void* arg) {
     set_target_msg_t* m = (set_target_msg_t*)arg;
+    bool now_zero = addr_is_zero(m->addr);
+
+    EnterCriticalSection(&e.snapshot_lock);
     memcpy(e.target, m->addr, sizeof(bd_addr_t));
+    e.has_target = !now_zero;
+    LeaveCriticalSection(&e.snapshot_lock);
+
+    if (now_zero) {
+        log_line("[engine] target cleared");
+        // Stop the supervisor; drop current link if any.
+        if (e.supervisor_started) {
+            reconnect_supervisor_stop();
+            e.supervisor_started = false;
+        }
+        if (e.a2dp_cid) {
+            a2dp_source_disconnect(e.a2dp_cid);
+        }
+        snapshot_set_state(ENGINE_STATE_DISCONNECTED);
+        return;
+    }
+
     log_line("[engine] target → %s", bd_addr_to_str(e.target));
-    // Drop the current link (if any) and let the supervisor reconnect
-    // to the new address.
+    // Re-init the supervisor so its log + attempt counter reflect the
+    // new target.
+    reconnect_supervisor_init(e.target, &attempt_connect_fn,
+                              e.reconnect_interval_ms);
     if (e.a2dp_cid) {
+        // Drop the old link; the supervisor will fire a new attempt
+        // when DISCONNECTION_COMPLETE arrives.
         a2dp_source_disconnect(e.a2dp_cid);
-    } else {
-        reconnect_supervisor_note_disconnected();
+        e.supervisor_started = true;   // already in supervised cycle
+    } else if (e.hci_working) {
+        reconnect_supervisor_start();
+        e.supervisor_started = true;
     }
 }
 
@@ -352,8 +426,121 @@ void engine_post_set_target(const bd_addr_t addr) {
     btstack_run_loop_execute_on_main_thread(&set_target_msg_storage.cb);
 }
 
+void engine_post_clear_target(void) {
+    bd_addr_t zero = {0, 0, 0, 0, 0, 0};
+    engine_post_set_target(zero);
+}
+
+// ── Scan posts (M8) ────────────────────────────────────────────────────
+typedef struct {
+    btstack_context_callback_registration_t cb;
+    uint8_t duration_units;
+} scan_start_msg_t;
+static scan_start_msg_t scan_start_msg_storage;
+
+static void try_next_name_request(void);
+
+static void on_bt_thread_start_scan(void* arg) {
+    scan_start_msg_t* m = (scan_start_msg_t*)arg;
+    if (e.scan_pub.active) {
+        log_line("[scan] start ignored (already scanning)");
+        return;
+    }
+
+    // Wipe previous results.
+    EnterCriticalSection(&e.snapshot_lock);
+    memset(&e.scan_pub, 0, sizeof(e.scan_pub));
+    LeaveCriticalSection(&e.snapshot_lock);
+    memset(e.scan_internal, 0, sizeof(e.scan_internal));
+    e.inquiry_complete = false;
+
+    uint8_t rc = gap_inquiry_start(m->duration_units);
+    if (rc != ERROR_CODE_SUCCESS) {
+        log_line("[scan] gap_inquiry_start rc=0x%02x", rc);
+        return;
+    }
+    EnterCriticalSection(&e.snapshot_lock);
+    e.scan_pub.active = true;
+    LeaveCriticalSection(&e.snapshot_lock);
+    log_line("[scan] inquiry started (%u units = %.1f s)",
+             m->duration_units, m->duration_units * 1.28f);
+}
+
+void engine_post_start_scan(uint8_t duration_units) {
+    if (duration_units < 1)  duration_units = 1;
+    if (duration_units > 30) duration_units = 30;
+    scan_start_msg_storage.duration_units = duration_units;
+    scan_start_msg_storage.cb.callback = &on_bt_thread_start_scan;
+    scan_start_msg_storage.cb.context  = &scan_start_msg_storage;
+    btstack_run_loop_execute_on_main_thread(&scan_start_msg_storage.cb);
+}
+
+static btstack_context_callback_registration_t scan_stop_cb_storage;
+static void on_bt_thread_stop_scan(void* arg) {
+    (void)arg;
+    if (e.scan_pub.active && !e.inquiry_complete) {
+        gap_inquiry_stop();
+        log_line("[scan] inquiry cancel requested");
+    }
+}
+void engine_post_stop_scan(void) {
+    scan_stop_cb_storage.callback = &on_bt_thread_stop_scan;
+    scan_stop_cb_storage.context  = NULL;
+    btstack_run_loop_execute_on_main_thread(&scan_stop_cb_storage);
+}
+
+static btstack_context_callback_registration_t scan_clear_cb_storage;
+static void on_bt_thread_clear_scan(void* arg) {
+    (void)arg;
+    if (e.scan_pub.active) return;   // refuse to clear mid-scan
+    EnterCriticalSection(&e.snapshot_lock);
+    memset(&e.scan_pub, 0, sizeof(e.scan_pub));
+    LeaveCriticalSection(&e.snapshot_lock);
+    memset(e.scan_internal, 0, sizeof(e.scan_internal));
+}
+void engine_post_clear_scan_results(void) {
+    scan_clear_cb_storage.callback = &on_bt_thread_clear_scan;
+    scan_clear_cb_storage.context  = NULL;
+    btstack_run_loop_execute_on_main_thread(&scan_clear_cb_storage);
+}
+
 void engine_set_log_callback(engine_log_fn fn) {
     e.log_fn = fn;
+}
+
+// ── Scan helpers ───────────────────────────────────────────────────────
+static int scan_find(const bd_addr_t addr) {
+    for (int i = 0; i < e.scan_pub.device_count; ++i) {
+        if (bd_addr_cmp(e.scan_pub.devices[i].addr, addr) == 0) return i;
+    }
+    return -1;
+}
+
+// Find next device whose name we haven't resolved and no request is
+// in flight; dispatch a gap_remote_name_request for it.
+static void try_next_name_request(void) {
+    for (int i = 0; i < e.scan_pub.device_count; ++i) {
+        if (!e.scan_pub.devices[i].have_name && !e.scan_internal[i].name_pending) {
+            e.scan_internal[i].name_pending = true;
+            gap_remote_name_request(
+                e.scan_pub.devices[i].addr,
+                e.scan_internal[i].page_scan_rep_mode,
+                e.scan_internal[i].clock_offset | 0x8000);
+            return;
+        }
+    }
+    // Nothing left to resolve. If inquiry is also done, we're idle.
+    bool any_pending = false;
+    for (int i = 0; i < e.scan_pub.device_count; ++i) {
+        if (e.scan_internal[i].name_pending) { any_pending = true; break; }
+    }
+    if (e.inquiry_complete && !any_pending) {
+        EnterCriticalSection(&e.snapshot_lock);
+        e.scan_pub.active = false;
+        LeaveCriticalSection(&e.snapshot_lock);
+        log_line("[scan] complete; %d device(s) seen",
+                 e.scan_pub.device_count);
+    }
 }
 
 // ── Internals ──────────────────────────────────────────────────────────
@@ -435,8 +622,28 @@ static void on_bt_thread_rebuild_wasapi(void* arg) {
         log_line("[engine] WASAPI re-init failed rc=%d — giving up", rc);
         return;
     }
+    if (new_ch != 2 || !a2dp_ldac_hz_to_sf_bit(new_sr)) {
+        log_line("[engine] WASAPI rebuilt at unsupported rate %d Hz / %d ch — "
+                 "LDAC needs stereo @ 44.1/48/88.2/96 kHz",
+                 new_sr, new_ch);
+        wasapi_loopback_stop();
+        EnterCriticalSection(&e.snapshot_lock);
+        e.wasapi_unsupported_rate_hz = new_sr;
+        LeaveCriticalSection(&e.snapshot_lock);
+        // Drop any active link so the GUI shows Disconnected; the user
+        // has to fix Windows audio settings and restart win-ldac.
+        if (e.a2dp_cid) a2dp_source_disconnect(e.a2dp_cid);
+        if (e.supervisor_started) {
+            reconnect_supervisor_stop();
+            e.supervisor_started = false;
+        }
+        return;
+    }
     e.wasapi_sample_rate = new_sr;
     e.wasapi_channels    = new_ch;
+    EnterCriticalSection(&e.snapshot_lock);
+    e.wasapi_unsupported_rate_hz = 0;
+    LeaveCriticalSection(&e.snapshot_lock);
     log_line("[engine] WASAPI rebuilt: %d Hz / %d-bit",
              new_sr, wasapi_loopback_device_bit_depth());
     wasapi_loopback_set_invalidated_callback(&wasapi_invalidated_cb);
@@ -481,10 +688,18 @@ static void hci_packet_handler(uint8_t pt, uint16_t ch,
         if (st == HCI_STATE_WORKING) {
             bd_addr_t local;
             gap_local_bd_addr(local);
-            log_line("[engine] HCI up. Local %s. Starting supervisor for %s",
-                     bd_addr_to_str(local), bd_addr_to_str(e.target));
-            snapshot_set_state(ENGINE_STATE_DISCONNECTED);
-            reconnect_supervisor_start();
+            e.hci_working = true;
+            if (e.has_target) {
+                log_line("[engine] HCI up. Local %s. Starting supervisor for %s",
+                         bd_addr_to_str(local), bd_addr_to_str(e.target));
+                snapshot_set_state(ENGINE_STATE_DISCONNECTED);
+                reconnect_supervisor_start();
+                e.supervisor_started = true;
+            } else {
+                log_line("[engine] HCI up. Local %s. No target — idle.",
+                         bd_addr_to_str(local));
+                snapshot_set_state(ENGINE_STATE_DISCONNECTED);
+            }
         } else if (st == HCI_STATE_OFF) {
             log_line("[engine] HCI off");
             snapshot_set_state(ENGINE_STATE_STOPPING);
@@ -518,6 +733,79 @@ static void hci_packet_handler(uint8_t pt, uint16_t ch,
         gap_pin_code_response(addr, "0000");
         break;
     }
+
+    // ── M8: GAP inquiry events ──────────────────────────────────────
+    case GAP_EVENT_INQUIRY_RESULT: {
+        bd_addr_t addr;
+        gap_event_inquiry_result_get_bd_addr(packet, addr);
+
+        int idx = scan_find(addr);
+        if (idx < 0) {
+            if (e.scan_pub.device_count >= ENGINE_SCAN_MAX) break;
+            idx = e.scan_pub.device_count;
+            EnterCriticalSection(&e.snapshot_lock);
+            memset(&e.scan_pub.devices[idx], 0,
+                   sizeof(e.scan_pub.devices[idx]));
+            bd_addr_copy(e.scan_pub.devices[idx].addr, addr);
+            e.scan_pub.device_count++;
+            LeaveCriticalSection(&e.snapshot_lock);
+            memset(&e.scan_internal[idx], 0, sizeof(e.scan_internal[idx]));
+        }
+
+        e.scan_internal[idx].page_scan_rep_mode =
+            gap_event_inquiry_result_get_page_scan_repetition_mode(packet);
+        e.scan_internal[idx].clock_offset =
+            gap_event_inquiry_result_get_clock_offset(packet);
+
+        EnterCriticalSection(&e.snapshot_lock);
+        e.scan_pub.devices[idx].cod =
+            gap_event_inquiry_result_get_class_of_device(packet);
+        if (gap_event_inquiry_result_get_rssi_available(packet)) {
+            e.scan_pub.devices[idx].rssi_dbm =
+                (int8_t)gap_event_inquiry_result_get_rssi(packet);
+            e.scan_pub.devices[idx].have_rssi = true;
+        }
+        if (gap_event_inquiry_result_get_name_available(packet)) {
+            int len = gap_event_inquiry_result_get_name_len(packet);
+            int cap = (int)sizeof(e.scan_pub.devices[idx].name) - 1;
+            if (len > cap) len = cap;
+            memcpy(e.scan_pub.devices[idx].name,
+                   gap_event_inquiry_result_get_name(packet), len);
+            e.scan_pub.devices[idx].name[len] = '\0';
+            e.scan_pub.devices[idx].have_name = true;
+        }
+        LeaveCriticalSection(&e.snapshot_lock);
+        break;
+    }
+
+    case GAP_EVENT_INQUIRY_COMPLETE:
+        e.inquiry_complete = true;
+        log_line("[scan] inquiry complete, %d device(s), resolving names...",
+                 e.scan_pub.device_count);
+        try_next_name_request();
+        break;
+
+    case HCI_EVENT_REMOTE_NAME_REQUEST_COMPLETE: {
+        bd_addr_t addr;
+        reverse_bd_addr(&packet[3], addr);
+        int idx = scan_find(addr);
+        if (idx < 0) break;
+        uint8_t status = packet[2];
+        if (status == 0) {
+            const char* nm = (const char*)&packet[9];
+            size_t len = strnlen(nm,
+                                 sizeof(e.scan_pub.devices[idx].name) - 1);
+            EnterCriticalSection(&e.snapshot_lock);
+            memcpy(e.scan_pub.devices[idx].name, nm, len);
+            e.scan_pub.devices[idx].name[len] = '\0';
+            e.scan_pub.devices[idx].have_name = true;
+            LeaveCriticalSection(&e.snapshot_lock);
+        }
+        e.scan_internal[idx].name_pending = false;
+        try_next_name_request();
+        break;
+    }
+
     default: break;
     }
 }

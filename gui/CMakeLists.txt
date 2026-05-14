@@ -55,13 +55,27 @@ if(MSVC)
 endif()
 
 # ── win-ldac.exe ───────────────────────────────────────────────
+# Embed the tray + window icon as a Win32 resource. The .rc.in template
+# gets the absolute path to assets/win-ldac.ico substituted at configure
+# time so the build is independent of the current working directory at
+# RC compile time. If the .ico is missing (fresh checkout, user hasn't
+# placed assets yet) we still configure the .rc with a stale path — RC
+# will fail loudly so the user knows what to add.
+set(WIN_LDAC_ICO_PATH "${CMAKE_SOURCE_DIR}/assets/win-ldac.ico")
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/win-ldac.rc.in
+    ${CMAKE_CURRENT_BINARY_DIR}/win-ldac.rc
+    @ONLY)
+
 add_executable(win-ldac WIN32
     src/main.cpp
     src/ui/status_window.cpp
+    ${CMAKE_CURRENT_BINARY_DIR}/win-ldac.rc
 )
 target_include_directories(win-ldac PRIVATE src)
 target_link_libraries(win-ldac PRIVATE
     core_engine
+    config_file
     imgui
     implot
     windowscodecs   # WIC, for monkey.png loading

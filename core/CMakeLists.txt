@@ -119,6 +119,14 @@ if(HAVE_BTSTACK)
         PUBLIC btstack wasapi_loopback a2dp_ldac_source bt_link_key_db
                reconnect_supervisor)
 
+    # M8: config file persistence. Used by the GUI to read the target
+    # device on startup and write it after pairing.
+    add_library(config_file STATIC
+        src/app/config_file.c
+    )
+    target_include_directories(config_file PUBLIC src)
+    target_link_libraries(config_file PUBLIC btstack)
+
     add_executable(engine_persistent_test
         src/tools/engine_persistent_test.c
     )

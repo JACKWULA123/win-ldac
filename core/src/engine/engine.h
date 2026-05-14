@@ -58,7 +58,8 @@ typedef enum {
 // section internally).
 typedef struct {
     engine_state_t        state;
-    bd_addr_t             target_addr;       // configured target
+    bd_addr_t             target_addr;       // configured target ({0} if unpaired)
+    bool                  has_target;        // false → engine is idle, awaiting pairing
     bool                  link_up;
     int                   sample_rate_hz;    // negotiated LDAC sample rate
     int                   wasapi_bit_depth;  // 16 / 24 / 32 (from Windows device format)
@@ -69,12 +70,38 @@ typedef struct {
     uint64_t              underrun_samples;
     int                   reconnect_attempts;
     bool                  idle_paused;       // AVDTP-suspended on silence; audio not flowing
+
+    // Non-zero if the Windows audio mixer is currently at a sample rate
+    // LDAC can't handle (anything except 44.1/48/88.2/96 kHz). Value is
+    // the offending rate in Hz so the GUI can name it in its dialog.
+    int                   wasapi_unsupported_rate_hz;
 } engine_status_t;
+
+// ── Scan state (M8 pairing flow) ───────────────────────────────────────
+// A separate snapshot the GUI polls while the pair modal is open.
+// Independent of engine_status_t so updating one doesn't churn the other.
+
+typedef struct {
+    bd_addr_t addr;
+    char      name[64];        // empty if name not yet resolved
+    int8_t    rssi_dbm;        // 0 if unknown
+    uint32_t  cod;             // Class of Device (24-bit)
+    bool      have_name;
+    bool      have_rssi;
+} engine_scan_device_t;
+
+#define ENGINE_SCAN_MAX 24
+
+typedef struct {
+    bool                 active;          // inquiry running or names being resolved
+    int                  device_count;
+    engine_scan_device_t devices[ENGINE_SCAN_MAX];
+} engine_scan_state_t;
 
 // ── Config ─────────────────────────────────────────────────────────────
 
 typedef struct {
-    bd_addr_t   target_addr;             // XM5 BD_ADDR
+    bd_addr_t   target_addr;             // XM5 BD_ADDR; pass {0} if unpaired
     const char* local_name;              // GAP local name, e.g. "win-ldac"
     uint32_t    reconnect_interval_ms;   // default 5000
     engine_bitrate_mode_t initial_bitrate_mode;
@@ -112,14 +139,36 @@ void engine_get_status_snapshot(engine_status_t* out);
 void engine_post_set_bitrate_mode(engine_bitrate_mode_t mode);
 
 // Drop the current A2DP link and let the reconnect supervisor try
-// again on its normal cadence. Used by the GUI "Disconnect / reconnect
-// now" button. No-op if no link is up.
+// again on its normal cadence. Used by the GUI "Connection Refresh"
+// button. No-op if no link is up.
 void engine_post_disconnect(void);
 
-// Change the target XM5. The current connection (if any) is dropped
-// and the supervisor will start trying the new address. Used by the
-// upcoming pairing flow.
+// Change the target device. The current connection (if any) is
+// dropped and the reconnect supervisor is (re)started with the new
+// address. Used by the pairing flow.
 void engine_post_set_target(const bd_addr_t addr);
+
+// Clear the configured target — engine stops trying to (re)connect
+// and goes into the "awaiting pairing" idle state. Used when the
+// user un-pairs from the GUI.
+void engine_post_clear_target(void);
+
+// ── Scan API (M8) ──────────────────────────────────────────────────────
+// Read the current scan state. Safe from any thread.
+void engine_get_scan_state(engine_scan_state_t* out);
+
+// Start a GAP Classic inquiry. `duration_units` is the BTstack duration
+// value: 1..30, each unit = 1.28 s. 8 ≈ 10 s is a good default. If a
+// scan is already running this is a no-op.
+void engine_post_start_scan(uint8_t duration_units);
+
+// Cancel an ongoing inquiry. Pending remote-name requests still
+// complete and update the snapshot. No-op if no scan is active.
+void engine_post_stop_scan(void);
+
+// Drop the previous scan's device list. Called by the GUI when the
+// pair modal re-opens so stale entries don't persist.
+void engine_post_clear_scan_results(void);
 
 // ── Logging hook ───────────────────────────────────────────────────────
 // Optional callback the engine fires for human-readable status events

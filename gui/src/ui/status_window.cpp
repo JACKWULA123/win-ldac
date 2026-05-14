@@ -91,7 +91,7 @@ static void right_aligned_text(ImFont* font, float size,
 }
 
 // ── Top device card (now also carries codec / sr / bitrate) ────────────
-static void draw_device_card(const engine_status_t* st, const UiResources& ui) {
+static void draw_device_card(const engine_status_t* st, UiResources& ui) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14, 8));
     ImGui::BeginChild("device_card", ImVec2(0, 56),
                       ImGuiChildFlags_Borders);
@@ -101,16 +101,23 @@ static void draw_device_card(const engine_status_t* st, const UiResources& ui) {
         ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
 
     // Build right-column strings up front so we can right-align them.
-    char addr[18];
-    std::snprintf(addr, sizeof(addr),
-                  "%02X:%02X:%02X:%02X:%02X:%02X",
-                  st->target_addr[0], st->target_addr[1], st->target_addr[2],
-                  st->target_addr[3], st->target_addr[4], st->target_addr[5]);
+    char addr[24];
+    if (st->has_target) {
+        std::snprintf(addr, sizeof(addr),
+                      "%02X:%02X:%02X:%02X:%02X:%02X",
+                      st->target_addr[0], st->target_addr[1], st->target_addr[2],
+                      st->target_addr[3], st->target_addr[4], st->target_addr[5]);
+    } else {
+        std::snprintf(addr, sizeof(addr), "Click Settings to pair");
+    }
 
     char big_value[32];
     char small_value[48];
     bool streaming = (st->state == ENGINE_STATE_STREAMING && !st->idle_paused);
-    if (streaming) {
+    if (!st->has_target) {
+        std::snprintf(big_value,   sizeof(big_value),   "--");
+        std::snprintf(small_value, sizeof(small_value), "(no target)");
+    } else if (streaming) {
         std::snprintf(big_value, sizeof(big_value),
                       "%d kbps", st->effective_kbps);
         std::snprintf(small_value, sizeof(small_value),
@@ -137,7 +144,10 @@ static void draw_device_card(const engine_status_t* st, const UiResources& ui) {
         ImGui::TableSetColumnIndex(0);
         ImGui::PushFont(ui.font, 17.0f);
         float big_h = ImGui::GetTextLineHeight();
-        ImGui::TextUnformatted("WH-1000XM5");
+        const char* device_label = ui.target_name[0] ? ui.target_name
+                                   : (st->has_target ? "Paired device"
+                                                     : "Not paired");
+        ImGui::TextUnformatted(device_label);
         ImGui::SameLine(0, 10);
         ImGui::PopFont();
         {
@@ -188,7 +198,7 @@ static void draw_device_card(const engine_status_t* st, const UiResources& ui) {
 }
 
 // ── Chart card (monkey watermark + ImPlot) ─────────────────────────────
-static void draw_chart_card(StatusSamples* samples, const UiResources& ui) {
+static void draw_chart_card(StatusSamples* samples, UiResources& ui) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
     ImGui::BeginChild("chart_card", ImVec2(0, 196),
                       ImGuiChildFlags_Borders);
@@ -292,26 +302,14 @@ static bool segmented_button(const char* label, bool active, ImVec2 size,
     return pressed;
 }
 
-// Module-level flag: set by the How2Use? button, consumed by the popup
-// renderer once per frame.
-static bool g_open_how2use_popup = false;
-
-// ── Mode segmented toggle row + How2Use? button ────────────────────────
+// ── Mode segmented toggle row ──────────────────────────────────────────
 static void draw_mode_row(const engine_status_t* st, StatusSamples* samples,
-                          const UiResources& ui) {
-    const float inner_gap = 4;     // between Fixed and Adaptive
-    const float outer_gap = 8;     // between toggle group and How2Use?
+                          UiResources& ui) {
+    const float inner_gap = 4;
     const float btn_h     = 30;
 
-    // Measure How2Use? button width at the toggle font size.
-    ImGui::PushFont(ui.font, 13.0f);
-    float how_w = ImGui::CalcTextSize("How2Use?").x +
-                  ImGui::GetStyle().FramePadding.x * 2 + 6;
-    ImGui::PopFont();
-
     const float total_w     = ImGui::GetContentRegionAvail().x;
-    const float toggle_w    = total_w - how_w - outer_gap;
-    const float toggle_each = (toggle_w - inner_gap) / 2.0f;
+    const float toggle_each = (total_w - inner_gap) / 2.0f;
 
     bool fixed_active = (st->bitrate_mode != ENGINE_BITRATE_ADAPTIVE);
 
@@ -320,6 +318,7 @@ static void draw_mode_row(const engine_status_t* st, StatusSamples* samples,
         if (!fixed_active) {
             engine_post_set_bitrate_mode(ENGINE_BITRATE_FIXED_HQ);
             samples->reset();
+            if (ui.on_bitrate_persist) ui.on_bitrate_persist(false);
         }
     }
     ImGui::SameLine(0, inner_gap);
@@ -328,67 +327,79 @@ static void draw_mode_row(const engine_status_t* st, StatusSamples* samples,
         if (fixed_active) {
             engine_post_set_bitrate_mode(ENGINE_BITRATE_ADAPTIVE);
             samples->reset();
+            if (ui.on_bitrate_persist) ui.on_bitrate_persist(true);
         }
     }
-
-    ImGui::SameLine(0, outer_gap);
-    // How2Use? — neutral secondary button with border.
-    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.96f, 0.97f, 0.99f, 1.00f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.92f, 0.94f, 0.97f, 1.00f));
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.85f, 0.86f, 0.88f, 1.00f));
-    ImGui::PushFont(ui.font, 13.0f);
-    if (ImGui::Button("How2Use?", ImVec2(how_w, btn_h))) {
-        g_open_how2use_popup = true;
-    }
-    ImGui::PopFont();
-    ImGui::PopStyleColor(4);
-    ImGui::PopStyleVar();
 }
 
-// ── How2Use? popup ─────────────────────────────────────────────────────
-static void draw_how2use_popup(const UiResources& ui) {
-    if (g_open_how2use_popup) {
-        ImGui::OpenPopup("how2use_modal");
-        g_open_how2use_popup = false;
+// ── Unsupported-rate error popup ──────────────────────────────────────
+// Shown when the engine reports the Windows mixer is at a rate LDAC
+// can't accept (e.g. 192 kHz). Caches the rate that was last acked so
+// the popup doesn't reopen every frame after the user dismisses it,
+// but does reopen if the rate changes to a different unsupported value.
+static int g_acked_unsupported_rate = 0;
+
+static void draw_unsupported_rate_popup(const engine_status_t* st,
+                                        UiResources& ui) {
+    int bad_rate = st->wasapi_unsupported_rate_hz;
+    if (bad_rate != 0 && bad_rate != g_acked_unsupported_rate) {
+        ImGui::OpenPopup("unsupported_rate_modal");
     }
 
     ImVec2 disp = ImGui::GetIO().DisplaySize;
     ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f),
                             ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(420, 240), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(440, 220), ImGuiCond_Appearing);
 
-    if (ImGui::BeginPopupModal("how2use_modal", nullptr,
-                               ImGuiWindowFlags_NoResize |
-                               ImGuiWindowFlags_NoMove |
-                               ImGuiWindowFlags_NoTitleBar)) {
-        ImGui::PushFont(ui.font, 16.0f);
-        ImGui::TextUnformatted("How to use win-ldac");
-        ImGui::PopFont();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        ImGui::PushFont(ui.font, 13.0f);
-        ImGui::TextWrapped("(Tutorial content to be written.)");
-        ImGui::PopFont();
-
-        // Push the Close button to the bottom-right.
-        float btn_h = 30, btn_w = 100;
-        ImGui::SetCursorPosY(ImGui::GetWindowHeight() - btn_h - 12);
-        ImGui::SetCursorPosX(ImGui::GetWindowWidth() - btn_w - 12);
-        ImGui::PushFont(ui.font, 13.0f);
-        if (ImGui::Button("Close", ImVec2(btn_w, btn_h))) {
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::PopFont();
-
-        ImGui::EndPopup();
+    if (!ImGui::BeginPopupModal("unsupported_rate_modal", nullptr,
+                                ImGuiWindowFlags_NoResize |
+                                ImGuiWindowFlags_NoMove |
+                                ImGuiWindowFlags_NoTitleBar)) {
+        return;
     }
+
+    ImGui::PushFont(ui.font, 16.0f);
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.78f, 0.30f, 0.30f, 1.0f));
+    ImGui::TextUnformatted("Unsupported sample rate");
+    ImGui::PopStyleColor();
+    ImGui::PopFont();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    ImGui::PushFont(ui.font, 13.0f);
+    ImGui::Text("Windows is delivering audio at %d Hz.", bad_rate);
+    ImGui::Spacing();
+    ImGui::TextWrapped(
+        "LDAC only accepts 44100, 48000, 88200, or 96000 Hz. "
+        "Open the Sound control panel (Win+R \xe2\x86\x92 mmsys.cpl), "
+        "right-click your output device \xe2\x86\x92 Properties \xe2\x86\x92 "
+        "Advanced tab, then set Default Format to one of the supported "
+        "rates.");
+    ImGui::Spacing();
+    ImGui::TextWrapped(
+        "After changing the rate, restart win-ldac. See the tutorial "
+        "file in the project root for more details.");
+    ImGui::PopFont();
+
+    float btn_h = 30, btn_w = 100;
+    ImGui::SetCursorPosY(ImGui::GetWindowHeight() - btn_h - 12);
+    ImGui::SetCursorPosX(ImGui::GetWindowWidth() - btn_w - 12);
+    ImGui::PushFont(ui.font, 13.0f);
+    if (ImGui::Button("OK", ImVec2(btn_w, btn_h))) {
+        g_acked_unsupported_rate = bad_rate;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::PopFont();
+
+    ImGui::EndPopup();
 }
 
+// Module-level flag: set by the Settings button, consumed by the pair
+// modal renderer once per frame.
+static bool g_open_pair_modal = false;
+
 // ── Bottom action row (compact) ────────────────────────────────────────
-static bool draw_action_row(const engine_status_t* st, const UiResources& ui) {
+static bool draw_action_row(const engine_status_t* st, UiResources& ui) {
     bool quit = false;
 
     const float gap = 6;
@@ -398,7 +409,7 @@ static bool draw_action_row(const engine_status_t* st, const UiResources& ui) {
 
     ImGui::PushFont(ui.font, 12.0f);
 
-    // Primary blue Reconnect
+    // Primary blue Connection Refresh
     ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.27f, 0.49f, 0.96f, 1.00f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.22f, 0.44f, 0.92f, 1.00f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.18f, 0.40f, 0.88f, 1.00f));
@@ -418,9 +429,9 @@ static bool draw_action_row(const engine_status_t* st, const UiResources& ui) {
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.85f, 0.86f, 0.88f, 1.00f));
 
-    ImGui::BeginDisabled(true);
-    ImGui::Button("Settings?", ImVec2(btn_w, btn_h));
-    ImGui::EndDisabled();
+    if (ImGui::Button("Pair new device", ImVec2(btn_w, btn_h))) {
+        g_open_pair_modal = true;
+    }
 
     ImGui::SameLine(0, gap);
     if (ImGui::Button("Quit", ImVec2(btn_w, btn_h))) quit = true;
@@ -433,9 +444,194 @@ static bool draw_action_row(const engine_status_t* st, const UiResources& ui) {
     return quit;
 }
 
+// ── Pair / settings modal ──────────────────────────────────────────────
+// Selected device row index, persists across frames while modal is open.
+static int  g_selected_device = -1;
+static bool g_filter_audio_only = true;
+
+static bool cod_is_audio(uint32_t cod) {
+    // Major Device Class field is bits 8..12; Audio/Video = 0x04.
+    return ((cod >> 8) & 0x1F) == 0x04 ||
+           // Or Audio Service Class set (bit 21 of services field).
+           (cod & 0x200000) != 0;
+}
+
+static void draw_pair_modal(const engine_status_t* st, UiResources& ui) {
+    if (g_open_pair_modal) {
+        ImGui::OpenPopup("pair_modal");
+        g_open_pair_modal = false;
+        g_selected_device = -1;
+        engine_post_clear_scan_results();
+    }
+
+    ImVec2 disp = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f),
+                            ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(disp.x - 24, disp.y - 30),
+                             ImGuiCond_Appearing);
+
+    if (!ImGui::BeginPopupModal("pair_modal", nullptr,
+                                ImGuiWindowFlags_NoResize |
+                                ImGuiWindowFlags_NoMove |
+                                ImGuiWindowFlags_NoTitleBar)) {
+        return;
+    }
+
+    ImGui::PushFont(ui.font, 16.0f);
+    ImGui::TextUnformatted("Pair a Bluetooth device");
+    ImGui::PopFont();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    engine_scan_state_t scan{};
+    engine_get_scan_state(&scan);
+
+    // Top row: Scan button + status + filter toggle
+    ImGui::PushFont(ui.font, 12.0f);
+    if (scan.active) {
+        ImGui::BeginDisabled(true);
+        ImGui::Button("Scanning...", ImVec2(120, 26));
+        ImGui::EndDisabled();
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.27f, 0.49f, 0.96f, 1));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.22f, 0.44f, 0.92f, 1));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.18f, 0.40f, 0.88f, 1));
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1, 1, 1, 1));
+        if (ImGui::Button("Scan now", ImVec2(120, 26))) {
+            engine_post_clear_scan_results();
+            engine_post_start_scan(8);  // 8 * 1.28s ≈ 10s
+        }
+        ImGui::PopStyleColor(4);
+    }
+    ImGui::SameLine(0, 12);
+    ImGui::TextDisabled("%d device%s",
+                        scan.device_count, scan.device_count == 1 ? "" : "s");
+
+    ImGui::SameLine();
+    float right_w = ImGui::CalcTextSize("Show non-audio devices").x + 40;
+    ImGui::SetCursorPosX(ImGui::GetContentRegionMax().x - right_w);
+    bool show_all = !g_filter_audio_only;
+    if (ImGui::Checkbox("Show non-audio devices", &show_all)) {
+        g_filter_audio_only = !show_all;
+        g_selected_device   = -1;  // selection may now point to filtered-out row
+    }
+    ImGui::PopFont();
+
+    ImGui::Spacing();
+
+    // Device list
+    ImGui::PushFont(ui.font, 12.0f);
+    float list_h = ImGui::GetContentRegionAvail().y - 50;
+    if (list_h < 120) list_h = 120;
+    ImGui::BeginChild("device_list", ImVec2(0, list_h),
+                      ImGuiChildFlags_Borders);
+
+    int visible = 0;
+    for (int i = 0; i < scan.device_count; ++i) {
+        const engine_scan_device_t& d = scan.devices[i];
+        if (g_filter_audio_only && !cod_is_audio(d.cod)) continue;
+        ++visible;
+
+        char addr[24];
+        std::snprintf(addr, sizeof(addr),
+                      "%02X:%02X:%02X:%02X:%02X:%02X",
+                      d.addr[0], d.addr[1], d.addr[2],
+                      d.addr[3], d.addr[4], d.addr[5]);
+
+        char label[160];
+        std::snprintf(label, sizeof(label),
+                      "%s##dev%d",
+                      d.have_name ? d.name : "(resolving name...)", i);
+
+        bool selected = (g_selected_device == i);
+        if (ImGui::Selectable(label, selected,
+                              ImGuiSelectableFlags_AllowDoubleClick,
+                              ImVec2(0, 26))) {
+            g_selected_device = i;
+        }
+
+        ImGui::SameLine(280);
+        ImGui::TextDisabled("%s", addr);
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(ImGui::GetContentRegionMax().x - 70);
+        if (d.have_rssi) {
+            ImGui::TextDisabled("%+4d dBm", d.rssi_dbm);
+        } else {
+            ImGui::TextDisabled("--");
+        }
+    }
+    if (visible == 0) {
+        ImGui::TextDisabled(scan.active
+            ? "Scanning..."
+            : "No devices yet. Put your headphones in pairing mode and click Scan now.");
+    }
+    ImGui::EndChild();
+    ImGui::PopFont();
+
+    ImGui::Spacing();
+
+    // Bottom action buttons: Unpair (if currently paired), Cancel, Pair
+    ImGui::PushFont(ui.font, 13.0f);
+    float btn_h = 30;
+
+    if (st->has_target) {
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 1));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.96f, 0.97f, 0.99f, 1));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.92f, 0.94f, 0.97f, 1));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1);
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.85f, 0.86f, 0.88f, 1));
+        if (ImGui::Button("Unpair current", ImVec2(140, btn_h))) {
+            if (ui.on_unpair) ui.on_unpair();
+        }
+        ImGui::PopStyleColor(4);
+        ImGui::PopStyleVar();
+        ImGui::SameLine();
+    }
+
+    // Push Cancel + Pair to the right.
+    float right_btns_w = 80 + 8 + 100;
+    ImGui::SameLine();
+    ImGui::SetCursorPosX(ImGui::GetContentRegionMax().x - right_btns_w);
+
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(1, 1, 1, 1));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.96f, 0.97f, 0.99f, 1));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.92f, 0.94f, 0.97f, 1));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1);
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.85f, 0.86f, 0.88f, 1));
+    if (ImGui::Button("Cancel", ImVec2(80, btn_h))) {
+        if (scan.active) engine_post_stop_scan();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::PopStyleColor(4);
+    ImGui::PopStyleVar();
+
+    ImGui::SameLine(0, 8);
+    bool can_pair = (g_selected_device >= 0 &&
+                     g_selected_device < scan.device_count);
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.27f, 0.49f, 0.96f, 1));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.22f, 0.44f, 0.92f, 1));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.18f, 0.40f, 0.88f, 1));
+    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1, 1, 1, 1));
+    ImGui::BeginDisabled(!can_pair);
+    if (ImGui::Button("Pair", ImVec2(100, btn_h)) && can_pair) {
+        const engine_scan_device_t& d = scan.devices[g_selected_device];
+        if (ui.on_pair) {
+            ui.on_pair(d.addr, d.have_name ? d.name : "");
+        }
+        if (scan.active) engine_post_stop_scan();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndDisabled();
+    ImGui::PopStyleColor(4);
+
+    ImGui::PopFont();
+
+    ImGui::EndPopup();
+}
+
 // ── Main entry ─────────────────────────────────────────────────────────
 bool draw_status_window(const engine_status_t* st, StatusSamples* samples,
-                        const UiResources& ui) {
+                        UiResources& ui) {
     bool quit_requested = false;
 
     ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -454,7 +650,8 @@ bool draw_status_window(const engine_status_t* st, StatusSamples* samples,
     draw_chart_card(samples, ui);
     draw_mode_row(st, samples, ui);
     if (draw_action_row(st, ui)) quit_requested = true;
-    draw_how2use_popup(ui);
+    draw_pair_modal(st, ui);
+    draw_unsupported_rate_popup(st, ui);
 
     ImGui::PopFont();
     ImGui::End();

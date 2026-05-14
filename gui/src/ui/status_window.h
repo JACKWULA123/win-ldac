@@ -42,12 +42,22 @@ struct UiResources {
     const char*   font_loaded_name  = nullptr;
     ImTextureID   monkey_tex        = 0;
     float         monkey_aspect     = 1.0f;     // width / height
+
+    // Mutable display state — owned here, modified by the pair flow.
+    char          target_name[64]   = {0};      // human-readable, blank if unpaired
+
+    // Persistence callbacks — main.cpp wires these to win_ldac_config_save.
+    // status_window invokes them after the user pairs / unpairs / toggles
+    // bitrate so disk state stays consistent.
+    void        (*on_pair)(const ::bd_addr_t addr, const char* name) = nullptr;
+    void        (*on_unpair)(void)                                    = nullptr;
+    void        (*on_bitrate_persist)(bool adaptive)                  = nullptr;
 };
 
 // Draw the full status window. Returns true if the user clicked the
 // Quit button.
 bool draw_status_window(const ::engine_status_t* st,
                         StatusSamples* samples,
-                        const UiResources& ui);
+                        UiResources& ui);
 
 }  // namespace win_ldac
