@@ -57,28 +57,10 @@ cmake --build build --config Release
 
 1. **插上 dongle。**
 2. **跑 Zadig。** Options → List All Devices。选你的 dongle（**注意 VID/PID 不要选错成内置蓝牙**），驱动选 WinUSB，点 Replace Driver。
-3. **耳机进配对模式。** Sony XM 系列：长按右侧电源键约 7 秒，蓝灯快闪。
-4. **运行 `win-ldac.exe`。** 首次启动显示 *Not paired*。点 *Pair new device* → *Scan now* → 等 ~10 秒 → 选你的耳机 → *Pair*。
-5. 之后启动会**自动连接**，Windows 一播音就开始传。
-
-## 日常使用
-
-- 关窗（点 `X`）**最小化到系统托盘**。程序继续跑，音频继续流
-- 双击托盘图标恢复窗口
-- 托盘右键菜单：*Open / Start with Windows / Quit*
-- 主界面切换 **Fixed (990 kbps)** 与 **Adaptive**。Adaptive 在链路差时自动降到 660 / 330
-- **Connection Refresh** 在偶发卡顿时强制重连
-
-## 故障排查
-
-| 现象 | 解决 |
-|---|---|
-| GUI 弹 *Unsupported sample rate* | LDAC 只接受 44.1 / 48 / 88.2 / 96 kHz。打开 `mmsys.cpl` → 右键默认输出 → 属性 → 高级 → 改 Default Format。重启 `win-ldac.exe` |
-| 扫描扫不到设备 | 确认耳机在**配对模式**（快速蓝灯闪），不是仅开机。第一次扫偶尔漏，点 *Scan now* 再扫一次 |
-| Zadig 后设备管理器里 dongle 带黄叹号 | Memory Integrity 还开着。关掉 → 重启 → 重跑 Zadig |
-| 连上但没声音 | 确认 Windows *默认播放设备*是你想镜像的扬声器 —— `win-ldac` 抓的是 Windows 正在播的任何音频 |
-| 音频卡顿 | 靠近 dongle / 切到 *Adaptive* / 点 *Connection Refresh* |
-| 干净机器上提示 "VCRUNTIME140.dll missing" | 装一下 [Microsoft Visual C++ Redistributable 2015–2022](https://aka.ms/vs/17/release/vc_redist.x64.exe) |
+3. 你需要一个除了你的耳机之外的声音输出设备，比如你的笔记本扬声器。确保它是静音的。在声音设置-设备属性-其他设备属性-高级-默认格式中选择你想要的声音质量。最高24bit-96000Hz。这将是无线传输前的采样率。
+4. **耳机进配对模式。** Sony XM 系列：长按右侧电源键约 7 秒，蓝灯快闪。
+5. **运行 `win-ldac.exe`。** 首次启动显示 *Not paired*。点 *Pair new device* → *Scan now* → 等 ~10 秒 → 选你的耳机 → *Pair*。
+6. 之后启动会**自动连接**，Windows 一播音就开始传。
 
 ## 项目结构
 
