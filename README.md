@@ -2,9 +2,6 @@
 
 **让你的WindowsPC能够通过LDAC编码连接到你的索尼耳机，以最高990kpbs码率享受品质音乐。**
 
-<img width="627" height="490" alt="捕获" src="https://github.com/user-attachments/assets/7b0199b9-5360-426a-9d64-ea993e0829bc" />
-
-
 English README: README_EN.md
 
 本方案需要一个外置USB蓝牙。如果你不想用，请搜索"Alternative A2DP Driver"。
