@@ -1,63 +1,15 @@
 # win-ldac
 
-**Windows 上的 LDAC。** 让你的 PC 通过外接 USB 蓝牙 dongle 用 **LDAC** 编码连接索尼 WH-1000XM 系列（或任何支持 LDAC 的）蓝牙耳机，最高 **990 kbps**，跟现代 Android 手机一样的音质。
+**让你的WindowsPC能够通过LDAC编码连接到你的索尼耳机，以最高990kpbs码率享受品质音乐。**
 
-> 🇬🇧 English README: [README.md](README.md)
+English README: README_EN.md
 
-Windows 自带蓝牙栈只做 SBC（~328 kbps）。LDAC 在 Windows 上历来只能靠付费闭源软件。本项目是开源替代。
+本方案需要一个外置USB蓝牙。如果你不想用，请搜索"Alternative A2DP Driver"。
 
-| 状态 | M9 完成 —— 完整 GUI + 系统托盘 + 开机自启 |
-|---|---|
+#你看到这里就可以了，剩下的交给AI大人。
+---
 
-## 工作原理
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│  Windows 10/11 用户态                                          │
-│                                                                │
-│   [ 系统音频 ] ──► WASAPI loopback ──► libldac ──► A2DP source │
-│                                          (Sony,       │       │
-│                                          Apache 2.0)  ▼       │
-│                                                    BTstack    │
-│                                                    (用户自拉) │
-│                                                       │       │
-│                                                       ▼       │
-│                                       [ USB 蓝牙 dongle ]      │
-│                                       (Zadig 改 WinUSB 驱动)   │
-└───────────────────────────────────────┼────────────────────────┘
-                                        │
-                                        ▼  Bluetooth 2.4 GHz
-                             [ Sony WH-1000XM5 ]
-```
-
-- 一只**独立 USB 蓝牙 dongle**，驱动通过 [Zadig](https://zadig.akeo.ie/) 从微软栈换成 **WinUSB**
-- 用户态 C++ 程序通过 [BTstack](https://github.com/bluekitchen/btstack) 直接驱动 dongle，用 [libldac](https://github.com/EHfive/ldacBT) 编码音频，按 RTP 帧封装 LDAC 经 A2DP 推出
-- **Windows 自带蓝牙不动** —— 鼠标键盘照常用
-
-## 许可与分发约束 —— 先看这部分
-
-本仓库源代码是 **Apache 2.0**。可以自由 fork / 修改 / 自编 / 分享源码。
-
-**但禁止分发预编译二进制。**
-
-`win-ldac` 链接 [BTstack](https://github.com/bluekitchen/btstack)，BTstack 只对个人 / 非商业用途免费。商业或分发使用需向 BlueKitchen GmbH 付费购买授权。为稳妥起见，本项目**只分发源码** —— 每位用户自己 clone 仓库本地编译。
-
-具体而言：
-
-- ✅ Clone、编译、自用 —— 没问题
-- ✅ Fork、修改、推到自己的 GitHub —— 没问题
-- ✅ 让朋友看仓库自行编译 —— 没问题
-- ❌ 把 `win-ldac.exe` 传到任何公开渠道
-- ❌ 卖
-- ❌ 打包进任何分发安装器
-
-完整的 license 清单见 [`NOTICE`](NOTICE)。
-
-## 硬件需求
-
-### USB 蓝牙 dongle
-
-**必须**有一只专门给 `win-ldac` 用的 USB BT dongle（驱动换成 WinUSB 后 Windows 自己不能并用）。
+本仓库源代码是 **Apache 2.0**。可以自由 fork / 修改 / 自编 / 分享源码,但禁止分发预编译二进制。
 
 | 芯片家族 | 例子 | 状态 |
 |---|---|---|
@@ -67,25 +19,6 @@ Windows 自带蓝牙栈只做 SBC（~328 kbps）。LDAC 在 Windows 上历来只
 | Intel AX200 / AX210 | WiFi+BT 组合卡 | ❌ 多阶段固件加载未实现 |
 | 笔记本 / PC 内置蓝牙 | — | ❌ **不要用**。驱动替换可能与 Wi-Fi 共天线冲突，恢复困难 |
 
-### 耳机
-
-任何在 A2DP 里 advertise LDAC vendor codec 的设备：
-
-- Sony WH-1000XM3 / XM4 / XM5 / XM6（开发测试目标）
-- Sony WF-1000XM3 / XM4 / XM5
-- Sony LinkBuds、ULT Wear 等
-- 大部分非 Sony 的 Hi-Res 认证 IEM（FiiO、Anker 等授权了 LDAC 的）
-
-只要耳机说 LDAC，就能用。
-
-## 编译
-
-### 一次性环境
-- **Windows 10 (x64)** 或更新
-- **Visual Studio 2022** + *C++ 桌面开发* workload（含 MSVC、Windows SDK ≥ 10.0.22621、CMake ≥ 3.16）
-- **Git**（要支持 submodule）
-- **Zadig** ≥ 2.8（<https://zadig.akeo.ie/>）
-- 一只支持的 BT dongle
 - **关闭 Memory Integrity / 内核隔离**
   （设置 → 隐私和安全性 → Windows 安全中心 → 设备安全性 → 内核隔离 → 内存完整性 = 关闭，重启）
 
